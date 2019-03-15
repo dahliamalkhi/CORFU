@@ -421,8 +421,7 @@ public class ClusterReconfigIT extends AbstractIT {
         Process corfuServer_3 = runPersistentServer(corfuSingleNodeHost, PORT_2, false);
         List<Process> corfuServers = Arrays.asList(corfuServer_1, corfuServer_2, corfuServer_3);
         final Layout layout = getLayout(3);
-        final int retries = 3;
-        BootstrapUtil.bootstrap(layout, retries, PARAMETERS.TIMEOUT_SHORT);
+        BootstrapUtil.bootstrap(layout, PARAMETERS.TIMEOUT_SHORT);
 
         // Create map and set up daemon writer thread.
         CorfuRuntime runtime = createDefaultRuntime();
@@ -520,8 +519,7 @@ public class ClusterReconfigIT extends AbstractIT {
         Process corfuServer_3 = runPersistentServer(corfuSingleNodeHost, PORT_2, false);
         final Layout layout = getLayout(3);
 
-        final int retries = 3;
-        BootstrapUtil.bootstrap(layout, retries, PARAMETERS.TIMEOUT_SHORT);
+        BootstrapUtil.bootstrap(layout, PARAMETERS.TIMEOUT_SHORT);
 
         CorfuRuntime corfuRuntime = createDefaultRuntime();
         assertThat(corfuRuntime.getLayoutView().getLayout().equals(layout)).isTrue();
@@ -557,7 +555,6 @@ public class ClusterReconfigIT extends AbstractIT {
         final int PORT_0 = 9000;
         Process corfuServer_1 = runPersistentServer(corfuSingleNodeHost, PORT_0, false);
         final Layout layout = getLayout(1);
-        final int retries = 5;
 
         IClientRouter router = new NettyClientRouter(NodeLocator
                 .parseString(corfuSingleNodeHost + ":" + PORT_0),
@@ -568,7 +565,7 @@ public class ClusterReconfigIT extends AbstractIT {
         retryBootstrapOperation(() -> CFUtils.getUninterruptibly(
                 new ManagementClient(router, layout.getEpoch()).bootstrapManagement(layout)));
 
-        BootstrapUtil.bootstrap(layout, retries, PARAMETERS.TIMEOUT_SHORT);
+        BootstrapUtil.bootstrap(layout, PARAMETERS.TIMEOUT_SHORT);
 
         CorfuRuntime corfuRuntime = createDefaultRuntime();
         assertThat(corfuRuntime.getLayoutView().getLayout().equals(layout)).isTrue();
@@ -599,7 +596,7 @@ public class ClusterReconfigIT extends AbstractIT {
         retryBootstrapOperation(() -> CFUtils.getUninterruptibly(
                 new LayoutClient(router, layout.getEpoch()).bootstrapLayout(wrongLayout)));
 
-        assertThatThrownBy(() -> BootstrapUtil.bootstrap(layout, retries, PARAMETERS.TIMEOUT_SHORT))
+        assertThatThrownBy(() -> BootstrapUtil.bootstrap(layout, PARAMETERS.TIMEOUT_SHORT))
                 .hasCauseInstanceOf(AlreadyBootstrappedException.class);
 
         shutdownCorfuServer(corfuServer_1);
@@ -631,7 +628,7 @@ public class ClusterReconfigIT extends AbstractIT {
         retryBootstrapOperation(() -> CFUtils.getUninterruptibly(
                 managementClient.bootstrapManagement(wrongLayout)));
 
-        assertThatThrownBy(() -> BootstrapUtil.bootstrap(layout, retries, PARAMETERS.TIMEOUT_SHORT))
+        assertThatThrownBy(() -> BootstrapUtil.bootstrap(layout, PARAMETERS.TIMEOUT_SHORT))
                 .hasCauseInstanceOf(AlreadyBootstrappedException.class);
 
         shutdownCorfuServer(corfuServer_1);
@@ -663,7 +660,7 @@ public class ClusterReconfigIT extends AbstractIT {
         Process corfuServer_3 = runPersistentServer(corfuSingleNodeHost, PORT_2, false);
         final Layout layout = getLayout(3);
         final int retries = 3;
-        BootstrapUtil.bootstrap(layout, retries, PARAMETERS.TIMEOUT_SHORT);
+        BootstrapUtil.bootstrap(layout, PARAMETERS.TIMEOUT_SHORT);
 
         // Create map and set up daemon writer thread.
         CorfuRuntime runtime = createDefaultRuntime();
@@ -813,7 +810,7 @@ public class ClusterReconfigIT extends AbstractIT {
         final Layout layout = getLayout(3);
 
         final int retries = 3;
-        BootstrapUtil.bootstrap(layout, retries, PARAMETERS.TIMEOUT_SHORT);
+        BootstrapUtil.bootstrap(layout, PARAMETERS.TIMEOUT_SHORT);
 
         CorfuRuntime runtime = createDefaultRuntime();
         UUID streamId = CorfuRuntime.getStreamID("testStream");
@@ -883,7 +880,7 @@ public class ClusterReconfigIT extends AbstractIT {
         final Layout layout = getLayout(3);
 
         final int retries = 3;
-        BootstrapUtil.bootstrap(layout, retries, PARAMETERS.TIMEOUT_SHORT);
+        BootstrapUtil.bootstrap(layout, PARAMETERS.TIMEOUT_SHORT);
 
         CorfuRuntime runtime = createDefaultRuntime();
         UUID streamId = CorfuRuntime.getStreamID("testStream");
@@ -960,8 +957,7 @@ public class ClusterReconfigIT extends AbstractIT {
         Process corfuServer_3 = runPersistentServer(corfuSingleNodeHost, PORT_2, false);
         final Layout layout = getLayout(3);
 
-        final int retries = 3;
-        BootstrapUtil.bootstrap(layout, retries, PARAMETERS.TIMEOUT_SHORT);
+        BootstrapUtil.bootstrap(layout, PARAMETERS.TIMEOUT_SHORT);
 
         final int systemDownHandlerLimit = 10;
         CorfuRuntime runtime = CorfuRuntime.fromParameters(CorfuRuntimeParameters.builder()
