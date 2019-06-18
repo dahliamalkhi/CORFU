@@ -3,6 +3,7 @@ package org.corfudb.runtime.view;
 import com.google.common.reflect.TypeToken;
 
 import java.util.EnumSet;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
@@ -19,6 +20,7 @@ import org.corfudb.runtime.object.CorfuCompileProxy;
 import org.corfudb.runtime.object.CorfuCompileWrapperBuilder;
 import org.corfudb.runtime.object.ICorfuSMR;
 import org.corfudb.runtime.object.IObjectBuilder;
+import org.corfudb.runtime.object.StreamId;
 import org.corfudb.util.serializer.ISerializer;
 import org.corfudb.util.serializer.Serializers;
 
@@ -88,20 +90,22 @@ public class ObjectBuilder<T> implements IObjectBuilder<T> {
     @SuppressWarnings("unchecked")
     public T open() {
 
-        if (streamName != null) {
-            streamID = CorfuRuntime.getStreamID(streamName);
-        }
-
         try {
+            StreamId streamIdentity = StreamId.build(
+                    Optional.ofNullable(streamName),
+                    Optional.ofNullable(streamID)
+            );
+
             if (options.contains(ObjectOpenOptions.NO_CACHE)) {
-                return CorfuCompileWrapperBuilder.getWrapper(type, runtime, streamID,
-                        arguments, serializer);
+                return CorfuCompileWrapperBuilder.getWrapper(
+                        type, runtime, streamIdentity, arguments, serializer
+                );
             } else {
-                ObjectsView.ObjectID<T> oid = new ObjectsView.ObjectID(streamID, type);
+                ObjectsView.ObjectID<T> oid = new ObjectsView.ObjectID(streamIdentity.getId(), type);
                 return (T) runtime.getObjectsView().objectCache.computeIfAbsent(oid, x -> {
                             try {
                                 T result = CorfuCompileWrapperBuilder.getWrapper(type, runtime,
-                                        streamID, arguments, serializer);
+                                        streamIdentity, arguments, serializer);
 
                                 // Get object serializer to check if we didn't attempt to set another serializer
                                 // to an already existing map
