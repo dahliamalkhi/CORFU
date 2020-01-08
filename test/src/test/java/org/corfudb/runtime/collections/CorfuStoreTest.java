@@ -454,3 +454,4 @@ public class CorfuStoreTest extends AbstractViewTest {
         return FileDescriptor.buildFrom(map.get(name), fileDescriptors);
     }
 }
+
