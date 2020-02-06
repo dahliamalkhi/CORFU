@@ -20,7 +20,6 @@ import org.corfudb.runtime.exceptions.LogUnitException;
 import org.corfudb.runtime.exceptions.OverwriteCause;
 import org.corfudb.runtime.exceptions.OverwriteException;
 import org.corfudb.runtime.exceptions.QuorumUnreachableException;
-import org.corfudb.runtime.exceptions.TrimmedException;
 import org.corfudb.runtime.exceptions.ValueAdoptedException;
 import org.corfudb.runtime.exceptions.unrecoverable.UnrecoverableCorfuInterruptedError;
 import org.corfudb.runtime.view.QuorumFuturesFactory;
@@ -34,8 +33,8 @@ import org.corfudb.util.retry.RetryNeededException;
 import javax.annotation.Nonnull;
 import java.time.Duration;
 import java.util.AbstractMap.SimpleImmutableEntry;
+import java.util.Collection;
 import java.util.Comparator;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -91,6 +90,7 @@ public class QuorumReplicationProtocol extends AbstractReplicationProtocol {
                 return null;
             }
             if (readResponse != null) {
+                updateCompactionMark(runtimeLayout.getRuntime(), readResponse.getCompactionMark());
                 LogData result = readResponse.getAddresses().get(address);
                 if (result != null && !isEmptyType(result.getType())) {
                     return result;
@@ -108,13 +108,22 @@ public class QuorumReplicationProtocol extends AbstractReplicationProtocol {
     @Override
     @Nonnull
     public Map<Long, ILogData> readAll(RuntimeLayout runtimeLayout,
-                                       List<Long> addresses,
+                                       Collection<Long> addresses,
                                        boolean waitForWrite,
                                        boolean cacheOnServer) {
         // TODO: replace this naive implementation
         return addresses.stream()
                 .map(addr -> new SimpleImmutableEntry<>(addr, read(runtimeLayout, addr)))
                 .collect(Collectors.toMap(SimpleImmutableEntry::getKey, SimpleImmutableEntry::getValue));
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public void commitAll(RuntimeLayout runtimeLayout, Collection<Long> addresses) {
+        // TODO: parallelize this operation as in chain replication.
+        addresses.forEach(addr -> read(runtimeLayout, addr));
     }
 
     /**
@@ -292,9 +301,14 @@ public class QuorumReplicationProtocol extends AbstractReplicationProtocol {
         public int compare(ReadResponse o1, ReadResponse o2) {
             LogData ld1 = o1.getAddresses().get(logPosition);
             LogData ld2 = o2.getAddresses().get(logPosition);
-            if(ld1.isTrimmed() || ld2.isTrimmed()) {
-                throw new TrimmedException();
+
+            if (ld1.isCompacted()) {
+                return ld2.isCompacted() ? 0 : 1;
             }
+            if (ld2.isCompacted()) {
+                return -1;
+            }
+
             IMetadata.DataRank rank1 = ld1.getRank();
             IMetadata.DataRank rank2 = ld2.getRank();
             if (rank1 == null) {

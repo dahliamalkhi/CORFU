@@ -13,7 +13,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.corfudb.common.compression.Codec;
 import org.corfudb.protocols.wireprotocol.ILogData;
 import org.corfudb.protocols.wireprotocol.LogData;
-import org.corfudb.protocols.wireprotocol.Token;
 import org.corfudb.runtime.CorfuRuntime;
 import org.corfudb.runtime.exceptions.OverwriteException;
 import org.corfudb.runtime.exceptions.RetryExhaustedException;
@@ -73,19 +72,10 @@ public class StateTransfer {
         IRetry.build(ExponentialBackoffRetry.class, RetryExhaustedException.class, () -> {
 
             try {
+                // TODO(Xin): Will there be any change in the context of sparse-trim garbage collection.
 
-                long trimMark = setTrimOnNewLogUnit(layout, runtime, endpoint);
-
-                if (trimMark > segment.getEnd()) {
-                    log.info("stateTransfer: Nothing to transfer, trimMark {}"
-                                    + "greater than end of segment {}",
-                            trimMark, segment.getEnd());
-                    return true;
-                }
-
-                // State transfer should start from segment start address or trim mark
-                // whichever is higher.
-                final long segmentStart = Math.max(trimMark, segment.getStart());
+                // State transfer should start from segment start address
+                final long segmentStart = segment.getStart();
                 final long segmentEnd = segment.getEnd() - 1;
                 log.info("stateTransfer: Total address range to transfer: [{}-{}] to node {}",
                         segmentStart, segmentEnd, endpoint);
@@ -103,6 +93,20 @@ public class StateTransfer {
                     // Read and write in chunks of chunkSize.
                     transferChunk(layout, runtime, endpoint, chunk);
                 }
+
+                // Send the segment end as the committed tail to the new log unit.
+                // This is required to prevent loss of committed tail on new log unit
+                // after state transfer finishes and then all other log units failed
+                // and auto commit service is paused.
+                CFUtils.getUninterruptibly(runtime.getLayoutView()
+                        .getRuntimeLayout(layout)
+                        .getLogUnitClient(endpoint)
+                        .updateCommittedTail(segmentEnd));
+
+                // Inform the log unit it has finished state transfer (so its committedTail becomes valid).
+                CFUtils.getUninterruptibly(runtime.getLayoutView().getRuntimeLayout(layout)
+                        .getLogUnitClient(endpoint).informStateTransferFinished());
+
             } catch (OverwriteException oe) {
 
                 log.error("stateTransfer: Overwrite Exception: retried: {} times",
@@ -119,32 +123,6 @@ public class StateTransfer {
             retry.setMaxRetryThreshold(MAX_RETRY_TIMEOUT);
             retry.setRandomPortion(RANDOM_FACTOR_BACKOFF);
         }).run();
-    }
-
-    /**
-     * Send the trimMark to the new/healing nodes.
-     * If this times out or fails, the Action performing the stateTransfer
-     * fails and retries.
-     * TrimMark is the first address present on the log unit server.
-     * Perform the prefix trim on the preceding address = (trimMark - 1).
-     * Since the LU will reject trim decisions made from older epochs, we
-     * need to adjust the new trim mark to have the new layout's epoch.
-     *
-     * @param layout   Current layout.
-     * @param runtime  Corfu runtime instance.
-     * @param endpoint Endpoint ot transfer data to.
-     * @return Trim Address.
-     */
-    private static long setTrimOnNewLogUnit(Layout layout, CorfuRuntime runtime,
-                                            String endpoint) {
-
-        long trimMark = runtime.getAddressSpaceView().getTrimMark().getSequence();
-
-        Token prefixToken = new Token(layout.getEpoch(), trimMark - 1);
-        CFUtils.getUninterruptibly(runtime.getLayoutView().getRuntimeLayout(layout)
-                .getLogUnitClient(endpoint)
-                .prefixTrim(prefixToken));
-        return trimMark;
     }
 
     /**
@@ -225,12 +203,12 @@ public class StateTransfer {
         }
 
         try {
-            // Write segment chunk to the new log unit
+            // Write segment chunk to the new log unit.
             ts1 = System.currentTimeMillis();
             boolean transferSuccess = CFUtils.getUninterruptibly(runtime.getLayoutView()
                     .getRuntimeLayout(layout)
                     .getLogUnitClient(endpoint)
-                    .writeRange(entries), OverwriteException.class);
+                    .writeAll(entries), OverwriteException.class);
 
             ts2 = System.currentTimeMillis();
 

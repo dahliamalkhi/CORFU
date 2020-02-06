@@ -10,6 +10,7 @@ import lombok.Setter;
 import org.corfudb.protocols.wireprotocol.CorfuMsg;
 import org.corfudb.protocols.wireprotocol.CorfuMsgType;
 import org.corfudb.protocols.wireprotocol.CorfuPayloadMsg;
+import org.corfudb.protocols.wireprotocol.InspectAddressesResponse;
 import org.corfudb.protocols.wireprotocol.KnownAddressResponse;
 import org.corfudb.protocols.wireprotocol.ReadResponse;
 import org.corfudb.protocols.wireprotocol.TailsResponse;
@@ -18,7 +19,6 @@ import org.corfudb.runtime.exceptions.DataOutrankedException;
 import org.corfudb.runtime.exceptions.OutOfSpaceException;
 import org.corfudb.runtime.exceptions.OverwriteCause;
 import org.corfudb.runtime.exceptions.OverwriteException;
-import org.corfudb.runtime.exceptions.TrimmedException;
 import org.corfudb.runtime.exceptions.ValueAdoptedException;
 
 
@@ -57,20 +57,6 @@ public class LogUnitHandler implements IClient, IHandler<LogUnitClient> {
     @ClientHandler(type = CorfuMsgType.WRITE_OK)
     private static Object handleOk(CorfuMsg msg, ChannelHandlerContext ctx, IClientRouter r) {
         return true;
-    }
-
-    /**
-     * Handle an ERROR_TRIMMED message.
-     *
-     * @param msg Incoming Message
-     * @param ctx Context
-     * @param r   Router
-     * @throws Exception Throws TrimmedException if address has already been trimmed.
-     */
-    @ClientHandler(type = CorfuMsgType.ERROR_TRIMMED)
-    private static Object handleTrimmed(CorfuMsg msg, ChannelHandlerContext ctx, IClientRouter r)
-            throws Exception {
-        throw new TrimmedException();
     }
 
     /**
@@ -198,21 +184,21 @@ public class LogUnitHandler implements IClient, IHandler<LogUnitClient> {
         return msg.getPayload();
     }
 
-    @ClientHandler(type = CorfuMsgType.LOG_ADDRESS_SPACE_RESPONSE)
-    private static Object handleStreamsAddressResponse(CorfuPayloadMsg<TailsResponse> msg,
-                                             ChannelHandlerContext ctx, IClientRouter r) {
+    @ClientHandler(type = CorfuMsgType.COMMITTED_TAIL_RESPONSE)
+    private static Object handleCommittedTailResponse(CorfuPayloadMsg<Long> msg,
+                                                      ChannelHandlerContext ctx, IClientRouter r) {
         return msg.getPayload();
     }
 
-    /**
-     * Handle a HEAD_RESPONSE message
-     * @param msg   Incoming Message
-     * @param ctx   Context
-     * @param r     Router
-     */
-    @ClientHandler(type=CorfuMsgType.TRIM_MARK_RESPONSE)
-    private static Object handleTrimMarkResponse(CorfuPayloadMsg<Long> msg,
-                                             ChannelHandlerContext ctx, IClientRouter r) {
+    @ClientHandler(type = CorfuMsgType.LOG_ADDRESS_SPACE_RESPONSE)
+    private static Object handleStreamsAddressResponse(CorfuPayloadMsg<TailsResponse> msg,
+                                                       ChannelHandlerContext ctx, IClientRouter r) {
+        return msg.getPayload();
+    }
+
+    @ClientHandler(type = CorfuMsgType.INSPECT_ADDRESSES_RESPONSE)
+    private static Object handleInspectAddressResponse(CorfuPayloadMsg<InspectAddressesResponse> msg,
+                                                       ChannelHandlerContext ctx, IClientRouter r) {
         return msg.getPayload();
     }
 

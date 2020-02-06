@@ -34,15 +34,11 @@ public class LogData implements ICorfuPayload<LogData>, IMetadata, ILogData {
 
     private ByteBuf serializedCache = null;
 
+    // last know serialized payload size.
+    @Getter
     private int lastKnownSize = NOT_KNOWN;
 
     private final transient AtomicReference<Object> payload = new AtomicReference<>();
-
-    public static LogData getTrimmed(long address) {
-        LogData logData = new LogData(DataType.TRIMMED);
-        logData.setGlobalAddress(address);
-        return logData;
-    }
 
     public static LogData getHole(long address) {
         LogData logData = new LogData(DataType.HOLE);
@@ -58,6 +54,12 @@ public class LogData implements ICorfuPayload<LogData>, IMetadata, ILogData {
 
     public static LogData getEmpty(long address) {
         LogData logData = new LogData(DataType.EMPTY);
+        logData.setGlobalAddress(address);
+        return logData;
+    }
+
+    public static LogData getCompacted(long address) {
+        LogData logData = new LogData(DataType.COMPACTED);
         logData.setGlobalAddress(address);
         return logData;
     }
@@ -156,7 +158,7 @@ public class LogData implements ICorfuPayload<LogData>, IMetadata, ILogData {
      */
     public LogData(ByteBuf buf) {
         type = ICorfuPayload.fromBuffer(buf, DataType.class);
-        if (type == DataType.DATA) {
+        if (type == DataType.DATA || type == DataType.GARBAGE) {
             data = ICorfuPayload.fromBuffer(buf, byte[].class);
         } else {
             data = null;
@@ -187,7 +189,7 @@ public class LogData implements ICorfuPayload<LogData>, IMetadata, ILogData {
     /**
      * Constructor for generating LogData.
      *
-     * @param type The type of log data to instantiate.
+     * @param type   The type of log data to instantiate.
      * @param object The actual data/value
      */
     public LogData(DataType type, final Object object) {
@@ -195,6 +197,7 @@ public class LogData implements ICorfuPayload<LogData>, IMetadata, ILogData {
             this.type = type;
             this.data = byteArrayFromBuf((ByteBuf) object);
             this.metadataMap = new EnumMap<>(IMetadata.LogUnitMetadataType.class);
+            setPayloadSize(data.length);
         } else {
             this.type = type;
             this.data = null;
@@ -242,6 +245,19 @@ public class LogData implements ICorfuPayload<LogData>, IMetadata, ILogData {
     }
 
     /**
+     * Reset the payload, assuming data type not changed.
+     *
+     * @param newPayload new payload to reset.
+     */
+    public void resetPayload(Object newPayload) {
+        data = null;
+        payload.set(newPayload);
+        serializedCache = null;
+        lastKnownSize = NOT_KNOWN;
+        unsetPayloadSize();
+    }
+
+    /**
      * Return a byte array from buffer.
      *
      * @param buf The buffer to read from
@@ -264,20 +280,13 @@ public class LogData implements ICorfuPayload<LogData>, IMetadata, ILogData {
         }
     }
 
-    void doSerializeInternal(ByteBuf buf) {
+    private void doSerializeInternal(ByteBuf buf) {
         ICorfuPayload.serialize(buf, type);
-        if (type == DataType.DATA) {
+        if (type == DataType.DATA || type == DataType.GARBAGE) {
             if (data == null) {
                 int lengthIndex = buf.writerIndex();
                 buf.writeInt(0);
-                if (hasPayloadCodec()) {
-                    // if the payload has a codec we need to also compress the payload
-                    ByteBuf serializeBuf = Unpooled.buffer();
-                    Serializers.CORFU.serialize(payload.get(), serializeBuf);
-                    doCompressInternal(serializeBuf, buf);
-                } else {
-                    Serializers.CORFU.serialize(payload.get(), buf);
-                }
+                serializePayload(buf);
                 int size = buf.writerIndex() - (lengthIndex + 4);
                 buf.writerIndex(lengthIndex);
                 buf.writeInt(size);
@@ -292,6 +301,32 @@ public class LogData implements ICorfuPayload<LogData>, IMetadata, ILogData {
         }
     }
 
+    /**
+     * Serialize the payload. NOT thread-safe.
+     *
+     * @param buf the buffer to serialize to
+     */
+    public void serializePayload(ByteBuf buf) {
+        if (payload.get() == null) {
+            return;
+        }
+
+        if (hasPayloadCodec()) {
+            // if the payload has a codec we need to also compress the payload
+            ByteBuf serializeBuf = Unpooled.buffer();
+            serializePayloadInternal(serializeBuf);
+            doCompressInternal(serializeBuf, buf);
+        } else {
+            serializePayloadInternal(buf);
+        }
+    }
+
+    private void serializePayloadInternal(ByteBuf buf) {
+        int prevIndex = buf.writerIndex();
+        Serializers.CORFU.serialize(payload.get(), buf);
+        setPayloadSize(buf.writerIndex() - prevIndex);
+    }
+
     private void doCompressInternal(ByteBuf bufData, ByteBuf buf) {
         ByteBuffer wrappedByteBuf = ByteBuffer.wrap(bufData.array(), 0, bufData.readableBytes());
         ByteBuffer compressedBuf = getPayloadCodecType().getInstance().compress(wrappedByteBuf);
@@ -301,8 +336,6 @@ public class LogData implements ICorfuPayload<LogData>, IMetadata, ILogData {
     /**
      * LogData are considered equals if clientId and threadId are equal.
      * Here, it means or both of them are null or both of them are the same.
-     * @param o
-     * @return
      */
     @Override
     public boolean equals(Object o) {
@@ -327,7 +360,7 @@ public class LogData implements ICorfuPayload<LogData>, IMetadata, ILogData {
 
     @Override
     public String toString() {
-        return "LogData[" + getGlobalAddress() + "]";
+        return String.format("LogData.%s[%d]", type, getGlobalAddress());
     }
 
     /**

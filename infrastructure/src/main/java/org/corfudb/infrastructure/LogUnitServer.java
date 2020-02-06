@@ -7,30 +7,30 @@ import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.corfudb.infrastructure.log.InMemoryStreamLog;
 import org.corfudb.infrastructure.log.StreamLog;
-import org.corfudb.infrastructure.log.StreamLogCompaction;
 import org.corfudb.infrastructure.log.StreamLogFiles;
+import org.corfudb.infrastructure.log.StreamLogParams;
 import org.corfudb.protocols.wireprotocol.CorfuMsg;
 import org.corfudb.protocols.wireprotocol.CorfuMsgType;
 import org.corfudb.protocols.wireprotocol.CorfuPayloadMsg;
 import org.corfudb.protocols.wireprotocol.ExceptionMsg;
 import org.corfudb.protocols.wireprotocol.ILogData;
+import org.corfudb.protocols.wireprotocol.InspectAddressesRequest;
+import org.corfudb.protocols.wireprotocol.InspectAddressesResponse;
 import org.corfudb.protocols.wireprotocol.KnownAddressRequest;
 import org.corfudb.protocols.wireprotocol.LogData;
 import org.corfudb.protocols.wireprotocol.MultipleReadRequest;
 import org.corfudb.protocols.wireprotocol.PriorityLevel;
-import org.corfudb.protocols.wireprotocol.RangeWriteMsg;
+import org.corfudb.protocols.wireprotocol.MultipleWriteMsg;
 import org.corfudb.protocols.wireprotocol.ReadRequest;
 import org.corfudb.protocols.wireprotocol.ReadResponse;
 import org.corfudb.protocols.wireprotocol.StreamsAddressResponse;
 import org.corfudb.protocols.wireprotocol.TailsRequest;
 import org.corfudb.protocols.wireprotocol.TailsResponse;
-import org.corfudb.protocols.wireprotocol.TrimRequest;
 import org.corfudb.protocols.wireprotocol.WriteRequest;
 import org.corfudb.runtime.exceptions.DataCorruptionException;
 import org.corfudb.runtime.exceptions.DataOutrankedException;
 import org.corfudb.runtime.exceptions.LogUnitException;
 import org.corfudb.runtime.exceptions.OverwriteException;
-import org.corfudb.runtime.exceptions.TrimmedException;
 import org.corfudb.runtime.exceptions.ValueAdoptedException;
 import org.corfudb.runtime.exceptions.WrongEpochException;
 import org.corfudb.runtime.view.stream.StreamAddressSpace;
@@ -44,10 +44,9 @@ import java.util.UUID;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
 
 import static org.corfudb.infrastructure.BatchWriterOperation.Type.LOG_ADDRESS_SPACE_QUERY;
-import static org.corfudb.infrastructure.BatchWriterOperation.Type.PREFIX_TRIM;
+import static org.corfudb.infrastructure.BatchWriterOperation.Type.MULTI_GARBAGE_WRITE;
 import static org.corfudb.infrastructure.BatchWriterOperation.Type.RANGE_WRITE;
 import static org.corfudb.infrastructure.BatchWriterOperation.Type.RESET;
 import static org.corfudb.infrastructure.BatchWriterOperation.Type.SEAL;
@@ -96,7 +95,6 @@ public class LogUnitServer extends AbstractServer {
      */
     private final LogUnitServerCache dataCache;
     private final StreamLog streamLog;
-    private final StreamLogCompaction logCleaner;
     private final BatchProcessor batchWriter;
 
     private ExecutorService executor;
@@ -121,13 +119,17 @@ public class LogUnitServer extends AbstractServer {
                     .convertToByteStringRepresentation(config.getMaxCacheSize()));
             streamLog = new InMemoryStreamLog();
         } else {
-            streamLog = new StreamLogFiles(serverContext, config.isNoVerify());
+            StreamLogParams streamLogParams = serverContext.getStreamLogParams();
+            streamLog = new StreamLogFiles(streamLogParams, serverContext.getStreamLogDataStore());
+            log.info("Log unit server started with stream log parameters: {}", streamLogParams);
         }
 
         dataCache = new LogUnitServerCache(config, streamLog);
         batchWriter = new BatchProcessor(streamLog, serverContext.getServerEpoch(), !config.isNoSync());
 
-        logCleaner = new StreamLogCompaction(streamLog, 10, 45, TimeUnit.MINUTES, ServerContext.SHUTDOWN_TIMER);
+        if (config.enableCompaction) {
+            streamLog.startCompactor();
+        }
     }
 
 
@@ -151,6 +153,38 @@ public class LogUnitServer extends AbstractServer {
     }
 
     /**
+     * Service an incoming query for the committed tail on this log unit server.
+     */
+    @ServerHandler(type = CorfuMsgType.COMMITTED_TAIL_REQUEST)
+    public void handleCommittedTailRequest(CorfuMsg msg, ChannelHandlerContext ctx, IServerRouter r) {
+        log.trace("handleCommittedTailRequest: received a committed log tail request {}", msg);
+        r.sendResponse(ctx, msg, CorfuMsgType.COMMITTED_TAIL_RESPONSE.payloadMsg(streamLog.getCommittedTail()));
+    }
+
+    /**
+     * Service an incoming request to update the current committed tail.
+     */
+    @ServerHandler(type = CorfuMsgType.UPDATE_COMMITTED_TAIL)
+    public void updateCommittedTail(CorfuPayloadMsg<Long> msg,
+                                    ChannelHandlerContext ctx, IServerRouter r) {
+        log.trace("updateCommittedTail: received request to update committed tail {}", msg);
+        streamLog.updateCommittedTail(msg.getPayload());
+        r.sendResponse(ctx, msg, CorfuMsgType.ACK.msg());
+    }
+
+    /**
+     * Service an incoming message to inform state transfer finished.
+     */
+    @ServerHandler(type = CorfuMsgType.INFORM_STATE_TRANSFER_FINISHED)
+    public void handleInformStateTransferFinished(CorfuMsg msg,
+                                                  ChannelHandlerContext ctx, IServerRouter r) {
+        log.trace("handleInformStateTransferFinished: received a notice that " +
+                "state transfer has finished {}", msg);
+        streamLog.setRequireStateTransfer(false);
+        r.sendResponse(ctx, msg, CorfuMsgType.ACK.msg());
+    }
+
+    /**
      * Service an incoming request for log address space, i.e., the map of addresses for every stream in the log.
      * This is used on sequencer bootstrap to provide the address maps for initialization.
      */
@@ -166,15 +200,6 @@ public class LogUnitServer extends AbstractServer {
                     handleException(ex, ctx, payloadMsg, r);
                     return null;
                 });
-    }
-
-    /**
-     * Service an incoming request to retrieve the starting address of this logging unit.
-     */
-    @ServerHandler(type = CorfuMsgType.TRIM_MARK_REQUEST)
-    public void handleTrimMarkRequest(CorfuMsg msg, ChannelHandlerContext ctx, IServerRouter r) {
-        log.debug("handleTrimMarkRequest: received a trim mark request {}", msg);
-        r.sendResponse(ctx, msg, CorfuMsgType.TRIM_MARK_RESPONSE.payloadMsg(streamLog.getTrimMark()));
     }
 
     /**
@@ -194,8 +219,6 @@ public class LogUnitServer extends AbstractServer {
         } else if (ex.getCause() instanceof ValueAdoptedException) {
             ValueAdoptedException vae = (ValueAdoptedException) ex.getCause();
             r.sendResponse(ctx, msg, CorfuMsgType.ERROR_VALUE_ADOPTED.payloadMsg(vae.getReadResponse()));
-        } else if (ex.getCause() instanceof TrimmedException) {
-            r.sendResponse(ctx, msg, CorfuMsgType.ERROR_TRIMMED.msg());
         } else {
             r.sendResponse(ctx, msg, CorfuMsgType.ERROR_SERVER_EXCEPTION.payloadMsg(new ExceptionMsg(ex)));
             throw new LogUnitException(ex);
@@ -222,24 +245,7 @@ public class LogUnitServer extends AbstractServer {
                 .thenRunAsync(() -> {
                     dataCache.put(msg.getPayload().getGlobalAddress(), logData);
                     r.sendResponse(ctx, msg, CorfuMsgType.WRITE_OK.msg());
-                }, executor).exceptionally(ex -> {
-                    handleException(ex, ctx, msg, r);
-                    return null;
-        });
-    }
-
-    /**
-     * Services incoming range write calls.
-     */
-    @ServerHandler(type = CorfuMsgType.RANGE_WRITE)
-    public void rangeWrite(CorfuPayloadMsg<RangeWriteMsg> msg,
-                           ChannelHandlerContext ctx, IServerRouter r) {
-        List<LogData> range = msg.getPayload().getEntries();
-        log.debug("rangeWrite: Writing {} entries [{}-{}]", range.size(),
-                range.get(0).getGlobalAddress(), range.get(range.size() - 1).getGlobalAddress());
-
-        batchWriter.addTask(RANGE_WRITE, msg)
-                .thenRun(() -> r.sendResponse(ctx, msg, CorfuMsgType.WRITE_OK.msg()))
+                }, executor)
                 .exceptionally(ex -> {
                     handleException(ex, ctx, msg, r);
                     return null;
@@ -247,18 +253,30 @@ public class LogUnitServer extends AbstractServer {
     }
 
     /**
-     * Perform a prefix trim.
-     * Here the token is not used to perform the trim as the epoch at which the checkpoint was completed
-     * might be old. Hence, we use the msg epoch to perform the trim. This should be safe provided that the
-     * trim is performed only on the token provided by the CheckpointWriter which ensures that the checkpoint
-     * was persisted. Using any other address to perform a trim can cause data loss.
+     * Services incoming multi write calls.
      */
-    @ServerHandler(type = CorfuMsgType.PREFIX_TRIM)
-    private void prefixTrim(CorfuPayloadMsg<TrimRequest> msg, ChannelHandlerContext ctx,
-                            IServerRouter r) {
-        log.debug("prefixTrim: trimming prefix to {}", msg.getPayload().getAddress());
-        batchWriter.addTask(PREFIX_TRIM, msg)
-                .thenRun(() -> r.sendResponse(ctx, msg, CorfuMsgType.ACK.msg()))
+    @ServerHandler(type = CorfuMsgType.MULTIPLE_WRITE)
+    public void multiWrite(CorfuPayloadMsg<MultipleWriteMsg> msg,
+                           ChannelHandlerContext ctx, IServerRouter r) {
+        List<LogData> entries = msg.getPayload().getEntries();
+        log.debug("multiWrite: Writing {} data entries: {}", entries.size());
+
+        batchWriter.addTask(RANGE_WRITE, msg)
+                .thenRunAsync(() -> r.sendResponse(ctx, msg, CorfuMsgType.WRITE_OK.msg()))
+                .exceptionally(ex -> {
+                    handleException(ex, ctx, msg, r);
+                    return null;
+                });
+    }
+
+    @ServerHandler(type = CorfuMsgType.MULTIPLE_GARBAGE_WRITE)
+    private void multiGarbageWrite(CorfuPayloadMsg<MultipleWriteMsg> msg,
+                                   ChannelHandlerContext ctx, IServerRouter r) {
+        List<LogData> garbageEntries = msg.getPayload().getEntries();
+        log.debug("multiGarbageWrite: Writing {} garbage entries", garbageEntries.size());
+
+        batchWriter.addTask(MULTI_GARBAGE_WRITE, msg)
+                .thenRunAsync(() -> r.sendResponse(ctx, msg, CorfuMsgType.WRITE_OK.msg()))
                 .exceptionally(ex -> {
                     handleException(ex, ctx, msg, r);
                     return null;
@@ -278,6 +296,7 @@ public class LogUnitServer extends AbstractServer {
                 rr.put(address, LogData.getEmpty(address));
             } else {
                 rr.put(address, (LogData) logData);
+                rr.setCompactionMark(streamLog.getGlobalCompactionMark());
             }
             r.sendResponse(ctx, msg, CorfuMsgType.READ_RESPONSE.payloadMsg(rr));
         } catch (DataCorruptionException e) {
@@ -293,12 +312,49 @@ public class LogUnitServer extends AbstractServer {
 
         ReadResponse rr = new ReadResponse();
         try {
-            for (Long address : msg.getPayload().getAddresses()) {
+            for (long address : msg.getPayload().getAddresses()) {
                 ILogData logData = dataCache.get(address, cacheable);
                 if (logData == null) {
                     rr.put(address, LogData.getEmpty(address));
                 } else {
                     rr.put(address, (LogData) logData);
+                }
+            }
+            rr.setCompactionMark(streamLog.getGlobalCompactionMark());
+            r.sendResponse(ctx, msg, CorfuMsgType.READ_RESPONSE.payloadMsg(rr));
+        } catch (DataCorruptionException e) {
+            r.sendResponse(ctx, msg, CorfuMsgType.ERROR_DATA_CORRUPTION.msg());
+        }
+    }
+
+    @ServerHandler(type = CorfuMsgType.INSPECT_ADDRESSES_REQUEST)
+    public void inspectAddresses(CorfuPayloadMsg<InspectAddressesRequest> msg,
+                                 ChannelHandlerContext ctx, IServerRouter r) {
+        log.trace("inspectAddresses: {}", msg.getPayload().getAddresses());
+        InspectAddressesResponse inspectResponse = new InspectAddressesResponse();
+        try {
+            for (long address : msg.getPayload().getAddresses()) {
+                if (!streamLog.contains(address)) {
+                    inspectResponse.add(address);
+                }
+            }
+            r.sendResponse(ctx, msg, CorfuMsgType.INSPECT_ADDRESSES_RESPONSE.payloadMsg(inspectResponse));
+        } catch (DataCorruptionException e) {
+            r.sendResponse(ctx, msg, CorfuMsgType.ERROR_DATA_CORRUPTION.msg());
+        }
+    }
+
+    @ServerHandler(type = CorfuMsgType.MULTIPLE_GARBAGE_REQUEST)
+    public void multiGarbageRead(CorfuPayloadMsg<MultipleReadRequest> msg,
+                                 ChannelHandlerContext ctx, IServerRouter r) {
+        log.trace("multiGarbageRead: {}", msg.getPayload().getAddresses());
+        ReadResponse rr = new ReadResponse();
+
+        try {
+            for (long address : msg.getPayload().getAddresses()) {
+                LogData logData = streamLog.readGarbageEntry(address);
+                if (logData != null) {
+                    rr.put(address, logData);
                 }
             }
             r.sendResponse(ctx, msg, CorfuMsgType.READ_RESPONSE.payloadMsg(rr));
@@ -324,13 +380,6 @@ public class LogUnitServer extends AbstractServer {
         } catch (Exception e) {
             handleException(e, ctx, msg, r);
         }
-    }
-
-    @ServerHandler(type = CorfuMsgType.COMPACT_REQUEST)
-    private void handleCompactRequest(CorfuMsg msg, ChannelHandlerContext ctx, IServerRouter r) {
-        log.debug("handleCompactRequest: received a compact request {}", msg);
-        streamLog.compact();
-        r.sendResponse(ctx, msg, CorfuMsgType.ACK.msg());
     }
 
     @ServerHandler(type = CorfuMsgType.FLUSH_CACHE)
@@ -393,7 +442,8 @@ public class LogUnitServer extends AbstractServer {
                         dataCache.invalidateAll();
                         log.info("LogUnit Server Reset.");
                         r.sendResponse(ctx, msg, CorfuMsgType.ACK.msg());
-                    }).exceptionally(ex -> {
+                    })
+                    .exceptionally(ex -> {
                         handleException(ex, ctx, msg, r);
                         return null;
                     });
@@ -403,7 +453,17 @@ public class LogUnitServer extends AbstractServer {
         }
     }
 
-
+    /**
+     * During normal production operation, log and garbage data are compacted internally and at the server's own pace.
+     * This function triggers compaction externally for testing purpose.
+     */
+    @VisibleForTesting
+    @ServerHandler(type = CorfuMsgType.RUN_COMPACTION)
+    private void handleCompactionRequest(CorfuMsg msg, ChannelHandlerContext ctx, IServerRouter r) {
+        log.debug("handleCompactionRequest: received a compaction request {}", msg);
+        runCompaction();
+        r.sendResponse(ctx, msg, CorfuMsgType.ACK.msg());
+    }
 
     /**
      * Shutdown the server.
@@ -412,7 +472,6 @@ public class LogUnitServer extends AbstractServer {
     public void shutdown() {
         super.shutdown();
         executor.shutdown();
-        logCleaner.shutdown();
         batchWriter.close();
     }
 
@@ -437,8 +496,14 @@ public class LogUnitServer extends AbstractServer {
     }
 
     @VisibleForTesting
-    void prefixTrim(long trimAddress) {
-        streamLog.prefixTrim(trimAddress);
+    public void runCompaction() {
+        if (config.enableCompaction) {
+            throw new IllegalStateException("Cannot manually run compaction since server is " +
+                    "started with compaction enabled.");
+        }
+        if (streamLog instanceof StreamLogFiles) {
+            ((StreamLogFiles) streamLog).getCompactor().compact();
+        }
     }
 
     /**
@@ -450,8 +515,8 @@ public class LogUnitServer extends AbstractServer {
         private final double cacheSizeHeapRatio;
         private final long maxCacheSize;
         private final boolean memoryMode;
-        private final boolean noVerify;
         private final boolean noSync;
+        private final boolean enableCompaction;
 
         /**
          * Parse legacy configuration options
@@ -466,8 +531,8 @@ public class LogUnitServer extends AbstractServer {
                     .cacheSizeHeapRatio(cacheSizeHeapRatio)
                     .maxCacheSize((long) (Runtime.getRuntime().maxMemory() * cacheSizeHeapRatio))
                     .memoryMode(Boolean.valueOf(opts.get("--memory").toString()))
-                    .noVerify((Boolean) opts.get("--no-verify"))
                     .noSync((Boolean) opts.get("--no-sync"))
+                    .enableCompaction(!((Boolean) opts.get("--no-compaction")))
                     .build();
         }
     }

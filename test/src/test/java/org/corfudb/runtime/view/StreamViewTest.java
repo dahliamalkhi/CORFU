@@ -1,29 +1,28 @@
 package org.corfudb.runtime.view;
 
-import com.google.common.reflect.TypeToken;
+import org.corfudb.infrastructure.ServerContextBuilder;
+import org.corfudb.protocols.logprotocol.SMRGarbageEntry;
+import org.corfudb.protocols.logprotocol.SMRGarbageRecord;
+import org.corfudb.protocols.logprotocol.SMRLogEntry;
+import org.corfudb.protocols.logprotocol.SMRRecord;
 import org.corfudb.protocols.wireprotocol.ILogData;
-import org.corfudb.protocols.wireprotocol.Token;
 import org.corfudb.protocols.wireprotocol.TokenResponse;
 import org.corfudb.runtime.CorfuRuntime;
-import org.corfudb.runtime.MultiCheckpointWriter;
-import org.corfudb.runtime.collections.CorfuTable;
-import org.corfudb.runtime.collections.StreamingMap;
-import org.corfudb.runtime.exceptions.TrimmedException;
-import org.corfudb.runtime.object.CorfuCompileProxy;
-import org.corfudb.runtime.object.ICorfuSMR;
-import org.corfudb.runtime.object.VersionLockedObject;
+import org.corfudb.runtime.GarbageInformer;
 import org.corfudb.runtime.view.stream.IStreamView;
+import org.corfudb.util.Utils;
+import org.corfudb.util.serializer.Serializers;
 import org.junit.Before;
 import org.junit.Test;
 
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.corfudb.infrastructure.log.StreamLogParams.RECORDS_PER_SEGMENT;
 
 /**
  * Created by mwei on 1/8/16.
@@ -34,7 +33,14 @@ public class StreamViewTest extends AbstractViewTest {
 
     @Before
     public void setRuntime() throws Exception {
-        r = getDefaultRuntime().connect();
+        ServerContextBuilder serverContextBuilder = new ServerContextBuilder()
+                .setMemory(false)
+                .setLogPath(PARAMETERS.TEST_TEMP_DIR)
+                .setCompactionPolicyType("GARBAGE_SIZE_FIRST")
+                .setSegmentGarbageRatioThreshold("0")
+                .setSegmentGarbageSizeThresholdMB("0");
+
+        r = getDefaultRuntime(serverContextBuilder).connect();
     }
 
     @Test
@@ -118,50 +124,6 @@ public class StreamViewTest extends AbstractViewTest {
 
         assertThat(sv.next())
                 .isEqualTo(null);
-    }
-
-    /**
-     * Test that a client can call IStreamView.remainingUpTo after a prefix trim.
-     * If remainingUpTo contains trimmed addresses, then they are ignored.
-     */
-    @Test
-    public void testRemainingUpToWithTrim() {
-        StreamOptions options = StreamOptions.builder()
-                .ignoreTrimmed(true)
-                .build();
-
-        IStreamView txStream = runtime.getStreamsView().get(ObjectsView.TRANSACTION_STREAM_ID, options);
-        final int firstIter = 50;
-        for (int x = 0; x < firstIter; x++) {
-            byte[] data = "Hello World!".getBytes();
-            txStream.append(data);
-        }
-
-        List<ILogData> entries = txStream.remainingUpTo((firstIter - 1) / 2);
-        assertThat(entries.size()).isEqualTo(firstIter / 2);
-
-        Token token = new Token(runtime.getLayoutView().getLayout().getEpoch(), (firstIter - 1) / 2);
-        runtime.getAddressSpaceView().prefixTrim(token);
-        runtime.getAddressSpaceView().invalidateServerCaches();
-        runtime.getAddressSpaceView().invalidateClientCache();
-
-        entries = txStream.remainingUpTo((firstIter - 1) / 2);
-        assertThat(entries.size()).isEqualTo(0);
-
-        entries = txStream.remainingUpTo(firstIter);
-        assertThat(entries.size()).isEqualTo((firstIter / 2));
-
-        // Open the stream with a new client
-        CorfuRuntime rt2 = getNewRuntime(getDefaultNode())
-                                        .connect();
-        IStreamView txStream2 = rt2.getStreamsView()
-                 .get(ObjectsView.TRANSACTION_STREAM_ID, options);
-        assertThatThrownBy(() -> txStream2.remaining())
-                .isInstanceOf(TrimmedException.class);
-
-        txStream2.seek(firstIter / 2);
-        entries = txStream2.remainingUpTo(Long.MAX_VALUE);
-        assertThat(entries.size()).isEqualTo((firstIter / 2));
     }
 
     @Test
@@ -361,30 +323,6 @@ public class StreamViewTest extends AbstractViewTest {
     }
 
     @Test
-    @SuppressWarnings("unchecked")
-    public void prefixTrimThrowsException()
-            throws Exception {
-        //begin tests
-        UUID streamA = CorfuRuntime.getStreamID("stream A");
-        byte[] testPayload = "hello world".getBytes();
-
-        // Write to the stream
-        IStreamView sv = r.getStreamsView().get(streamA);
-        sv.append(testPayload);
-
-        // Trim the entry
-        Token token = new Token(runtime.getLayoutView().getLayout().getEpoch(), 0);
-        runtime.getAddressSpaceView().prefixTrim(token);
-        runtime.getAddressSpaceView().gc();
-        runtime.getAddressSpaceView().invalidateServerCaches();
-        runtime.getAddressSpaceView().invalidateClientCache();
-
-        // We should get a prefix trim exception when we try to read
-        assertThatThrownBy(() -> sv.next())
-                .isInstanceOf(TrimmedException.class);
-    }
-
-    @Test
     public void testPreviousWithNoCheckpoints() {
         IStreamView sv = r.getStreamsView().get(CorfuRuntime.getStreamID("streamA"));
         assertThat(sv.getCurrentGlobalPosition()).isEqualTo(Address.NON_ADDRESS);
@@ -404,134 +342,50 @@ public class StreamViewTest extends AbstractViewTest {
     }
 
     @Test
-    public void testPreviousWithStreamCheckpoint() throws Exception {
-        String stream = "stream1";
-        StreamingMap<String, String> map = r.getObjectsView()
-                .build()
-                .setStreamName(stream)
-                .setTypeToken(new TypeToken<CorfuTable<String, String>>() {})
-                .open();
+    public void testCompactionMark() {
+        UUID streamId = CorfuRuntime.getStreamID("stream A");
+        IStreamView sv = r.getStreamsView().get(streamId);
 
-        map.put("k1", "k1");
+        final int entryNum = RECORDS_PER_SEGMENT + 1;
+        final long garbageAddress = 1L;
+        int smrEntrySize = 0;
 
-        UUID streamId = CorfuRuntime.getStreamID(stream);
-        long baseVersion = r.getSequencerView().query(streamId);
+        // writes data to global address
+        for (int i = 0; i <= entryNum; ++i) {
+            SMRRecord smrRecord = new SMRRecord("hi", new Object[]{("hello" + i)}, Serializers.JSON);
+            SMRLogEntry smrLogEntry = new SMRLogEntry();
+            smrLogEntry.addTo(streamId, Collections.singletonList(smrRecord));
+            sv.append(smrLogEntry);
+            if (i == garbageAddress) {
+                smrEntrySize = smrRecord.getSerializedSize();
+            }
+        }
 
-        MultiCheckpointWriter mcw = new MultiCheckpointWriter();
-        mcw.addMap(map);
-        Token token = mcw.appendCheckpoints(r, "cp");
+        // Update committed tail so that compactor can run.
+        Utils.updateCommittedTail(r.getLayoutView().getLayout(), r, entryNum - 1);
 
-        // Add some more write after the checkpoint
-        map.put("k2", "k2");
-        map.put("k3", "k3");
+        // write one synthesized garbage decision
+        final long markerAddress = 3L;
+        SMRGarbageRecord garbageRecord = new SMRGarbageRecord(markerAddress, smrEntrySize);
+        SMRGarbageEntry smrGarbageEntry = new SMRGarbageEntry();
+        smrGarbageEntry.add(streamId, 0, garbageRecord);
+        smrGarbageEntry.setGlobalAddress(garbageAddress);
+        GarbageInformer.GarbageBatch garbageBatch =
+                new GarbageInformer.GarbageBatch(Collections.singletonList(smrGarbageEntry));
+        GarbageInformer garbageInformer = new GarbageInformer(r);
+        garbageInformer.sendGarbageBatch(garbageBatch);
 
-        Map<String, String> mapCopy = r.getObjectsView()
-                .build()
-                .setStreamName(stream)
-                .setTypeToken(new TypeToken<CorfuTable<String, String>>() {})
-                .option(ObjectOpenOption.NO_CACHE)
-                .open();
+        // run compaction on LogUnit servers
+        getLogUnit(SERVERS.PORT_0).runCompaction();
+        getRuntime().getAddressSpaceView().resetCaches();
+        getRuntime().getAddressSpaceView().invalidateServerCaches();
 
-        mapCopy.size();
-        VersionLockedObject vlo = ((CorfuCompileProxy) ((ICorfuSMR) mapCopy).
-                getCorfuSMRProxy()).getUnderlyingObject();
-
-        Token finalVersion = r.getSequencerView().query().getToken();
-
-        IStreamView sv = r.getStreamsView().get(CorfuRuntime.getStreamID(stream));
-
-        // Need to call this to bump up the stream pointer
-        // TODO(Maithem): other streaming APIs seem to be broken (i.e. they don't increment
-        // the stream pointer).
-        while (sv.nextUpTo(Long.MAX_VALUE) != null);
-
-        assertThat(sv.getCurrentGlobalPosition()).isEqualTo(finalVersion.getSequence());
-        assertThat(sv.previous()).isNotNull();
-        assertThat(sv.previous()).isNull();
-        // This +1 represents the checkpoint NO_OP entry
-        assertThat(sv.getCurrentGlobalPosition()).isEqualTo(baseVersion + 1);
-        // Calling previous on a stream when the pointer points to a a base checkpoint
-        // should throw a TrimmedException
-        assertThatThrownBy(() -> sv.previous()).isInstanceOf(TrimmedException.class);
-        assertThat(sv.getCurrentGlobalPosition()).isEqualTo(baseVersion + 1);
-    }
-
-    /**
-     * Perform a prefix trim on the given runtime, using the provided parameters. Once th trim
-     * has been issue, wait for the change to take an effect.
-     *
-     * @param runtime on which we are operating
-     * @param epoch associated with the prefix trim
-     * @param address associated with the prefix trim
-     */
-    private void synchronousPrefixTrim(CorfuRuntime runtime, long epoch, long address) {
-        final Token prevTrimMark = runtime.getAddressSpaceView().getTrimMark();
-        runtime.getAddressSpaceView().prefixTrim(new Token(epoch, address));
-        while (prevTrimMark.equals(runtime.getAddressSpaceView().getTrimMark())) { }
-    }
-
-    /**
-     * Ensure that transaction stream semantics are correct with respect to different
-     * combinations of trim points and seek positions.
-     *
-     * @throws InterruptedException
-     */
-    @Test
-    public void txLogTrim() {
-        final CorfuRuntime.CorfuRuntimeParameters params = CorfuRuntime.CorfuRuntimeParameters
-                .builder()
-                .build();
-        final CorfuRuntime localRuntime = CorfuRuntime.fromParameters(params)
-                .setTransactionLogging(true)
-                .parseConfigurationString(getDefaultConfigurationString())
-                .connect();
-        final CorfuTable<String, String>
-                instance1 = localRuntime.getObjectsView().build()
-                .setTypeToken(new TypeToken<CorfuTable<String, String>>() {})
-                .setStreamName("txTestMap")
-                .open();
-
-        // Populate the Transaction Stream up to NUM_ITERATIONS_LOW entries.
-        IntStream.range(0, PARAMETERS.NUM_ITERATIONS_LOW).forEach(idx -> {
-            localRuntime.getObjectsView().TXBegin();
-            instance1.put(String.valueOf(idx), String.valueOf(idx));
-            localRuntime.getObjectsView().TXEnd();
-        });
-
-        // Force a prefix trim.
-        final long epoch = 0L;
-        synchronousPrefixTrim(localRuntime, epoch, PARAMETERS.NUM_ITERATIONS_LOW/2/2);
-
-        // Wait until log is trimmed.
-        localRuntime.getAddressSpaceView().invalidateServerCaches();
-        localRuntime.getAddressSpaceView().invalidateClientCache();
-
-        IStreamView txStream = localRuntime.getStreamsView()
-                .get(ObjectsView.TRANSACTION_STREAM_ID);
-
-        // If the current pointer is below the trim point, we should see the TrimmedException.
-        assertThatThrownBy(() -> txStream.remaining()).isInstanceOf(TrimmedException.class);
-
-        // Seek the transaction stream beyond the trim point. We should not see any issues.
-        txStream.seek(PARAMETERS.NUM_ITERATIONS_LOW/2);
-        txStream.remaining();
-
-        // Populate the transaction stream with additional NUM_ITERATIONS_LOW entries.
-        IntStream.range(0, PARAMETERS.NUM_ITERATIONS_LOW).forEach(idx -> {
-            localRuntime.getObjectsView().TXBegin();
-            instance1.put(String.valueOf(idx), String.valueOf(idx));
-            localRuntime.getObjectsView().TXEnd();
-        });
-
-        // Force a prefix trim beyond our current pointer.
-        synchronousPrefixTrim(localRuntime, epoch,
-                PARAMETERS.NUM_ITERATIONS_LOW + PARAMETERS.NUM_ITERATIONS_LOW/2);
-
-        // Wait until log is trimmed.
-        assertThatThrownBy(() -> txStream.remaining()).isInstanceOf(TrimmedException.class);
-
-        // Ensure that we can recover.
-        txStream.seek(localRuntime.getSequencerView().query().getSequence());
-        txStream.remaining();
+        // Assert skipping compacted entry
+        sv.seek(0L);
+        sv.next();
+        ILogData data = sv.next();
+        SMRLogEntry logEntry = (SMRLogEntry) data.getPayload(r);
+        assertThat(logEntry.getSMRUpdates(streamId).get(0).getSMRArguments())
+                .isEqualTo(new Object[]{("hello" + 2)});
     }
 }

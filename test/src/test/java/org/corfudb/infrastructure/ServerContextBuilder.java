@@ -36,6 +36,8 @@ public class ServerContextBuilder {
     int port = 9000;
     String seqCache = "1000";
     String logSizeLimitPercentage = "100.0";
+    String maxOpenStreamSegments = "100";
+    String maxOpenGarbageSegments = "50";
     String batchSize = "100";
     String managementBootstrapEndpoint = null;
     IServerRouter serverRouter;
@@ -43,6 +45,19 @@ public class ServerContextBuilder {
     String handshakeTimeout = "10";
     String prefix = "";
     String retention = "1000";
+
+    boolean noCompaction = true;
+    String compactionPolicyType = "SNAPSHOT_LENGTH_FIRST";
+    // Following two parameters can be arbitrary as compaction is only
+    // manually triggered in testing framework.
+    String compactionInitialDelay = "0";
+    String compactionPeriod = "1";
+    String compactionWorkers = "4";
+    String maxSegmentsForCompaction = "8";
+    String protectedSegments = "1";
+    String segmentGarbageRatioThreshold = "0.1";
+    String segmentGarbageSizeThresholdMB = "0.1";
+    String totalGarbageSizeThresholdMB = "10.0";
 
     String clusterId = "auto";
     boolean isTest = true;
@@ -60,31 +75,43 @@ public class ServerContextBuilder {
                 .put("--HandshakeTimeout", handshakeTimeout)
                 .put("--sequencer-cache-size", seqCache)
                 .put("--log-size-quota-percentage", logSizeLimitPercentage)
+                .put("--max-open-stream-segments", maxOpenStreamSegments)
+                .put("--max-open-garbage-segments", maxOpenGarbageSegments)
                 .put("--batch-size", batchSize)
-                .put("--metadata-retention", retention);
+                .put("--metadata-retention", retention)
+                .put("--no-verify", noVerify)
+                .put("--no-sync", noSync)
+                .put("--address", address)
+                .put("--cache-heap-ratio", cacheSizeHeapRatio)
+                .put("--no-compaction", noCompaction)
+                .put("--compaction-policy", compactionPolicyType)
+                .put("--compaction-initial-delay", compactionInitialDelay)
+                .put("--compaction-period", compactionPeriod)
+                .put("--compaction-worker-threads", compactionWorkers)
+                .put("--max-segments-for-compaction", maxSegmentsForCompaction)
+                .put("--protected-segments", protectedSegments)
+                .put("--segment-garbage-ratio-threshold", segmentGarbageRatioThreshold)
+                .put("--segment-garbage-size-threshold", segmentGarbageSizeThresholdMB)
+                .put("--total-garbage-size-threshold", totalGarbageSizeThresholdMB)
+                .put("--enable-tls", tlsEnabled)
+                .put("--enable-tls-mutual-auth", tlsMutualAuthEnabled)
+                .put("--tls-protocols", tlsProtocols)
+                .put("--tls-ciphers", tlsCiphers)
+                .put("--keystore", keystore)
+                .put("--keystore-password-file", keystorePasswordFile)
+                .put("--truststore", truststore)
+                .put("--truststore-password-file", truststorePasswordFile)
+                .put("--enable-sasl-plain-text-auth", saslPlainTextAuth)
+                .put("--cluster-id", clusterId)
+                .put("--implementation", implementation)
+                .put("<port>", Integer.toString(port));
+
         if (logPath != null) {
-         builder.put("--log-path", logPath);
+            builder.put("--log-path", logPath);
         }
         if (managementBootstrapEndpoint != null) {
             builder.put("--management-server", managementBootstrapEndpoint);
         }
-         builder
-                 .put("--no-verify", noVerify)
-                 .put("--no-sync", noSync)
-                 .put("--address", address)
-                 .put("--cache-heap-ratio", cacheSizeHeapRatio)
-                 .put("--enable-tls", tlsEnabled)
-                 .put("--enable-tls-mutual-auth", tlsMutualAuthEnabled)
-                 .put("--tls-protocols", tlsProtocols)
-                 .put("--tls-ciphers", tlsCiphers)
-                 .put("--keystore", keystore)
-                 .put("--keystore-password-file", keystorePasswordFile)
-                 .put("--truststore", truststore)
-                 .put("--truststore-password-file", truststorePasswordFile)
-                 .put("--enable-sasl-plain-text-auth", saslPlainTextAuth)
-                 .put("--cluster-id", clusterId)
-                 .put("--implementation", implementation)
-                 .put("<port>", Integer.toString(port));
 
         // Set the prefix to the port number
         if (prefix.equals("")) {

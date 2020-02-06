@@ -1,10 +1,7 @@
 package org.corfudb.runtime.object;
 
 import com.google.common.reflect.TypeToken;
-import org.corfudb.protocols.wireprotocol.Token;
-import org.corfudb.runtime.CorfuRuntime;
 import org.corfudb.runtime.collections.CorfuTable;
-import org.corfudb.runtime.exceptions.TrimmedException;
 import org.corfudb.runtime.view.AbstractViewTest;
 import org.junit.Test;
 
@@ -14,7 +11,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Created by mwei on 11/11/16.
@@ -39,32 +35,6 @@ public class CompileProxyTest extends AbstractViewTest {
                 .containsEntry("hello", "world");
         assertThat(map)
                 .containsEntry("hell", "world");
-    }
-
-    @Test
-    public void testTrimmedObject() throws Exception {
-        CorfuRuntime rt = getDefaultRuntime();
-
-        // Advance the sequencer counter and trim up to the tail, so that the first
-        // read will be on a trimmed address
-        final int numOfTokens = 10;
-        String streamName = "s1";
-        rt.getSequencerView().next(CorfuRuntime.getStreamID(streamName));
-
-        // Trim all the way up to the tail
-        Token token = new Token(rt.getLayoutView().getLayout().getEpoch(), numOfTokens);
-        rt.getAddressSpaceView().prefixTrim(token);
-        rt.getAddressSpaceView().gc();
-        rt.getAddressSpaceView().invalidateServerCaches();
-
-        Map<String, String> map = rt.getObjectsView().build()
-                .setStreamName(streamName)
-                .setTypeToken(new TypeToken<CorfuTable<String,String>>() {})
-                .open();
-        // Note: because we trimmed and no CP covers these changes we throw a trimmedException, is this right? we would never recover from this...
-        assertThatThrownBy(() -> {
-            map.get("key1");
-        }).isInstanceOf(TrimmedException.class);
     }
 
     @Test

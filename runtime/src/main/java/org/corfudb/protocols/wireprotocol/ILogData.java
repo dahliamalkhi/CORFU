@@ -114,6 +114,13 @@ public interface ILogData extends IMetadata, Comparable<ILogData> {
     void useToken(IToken token);
 
     /**
+     * Reset the payload, assuming data type not changed.
+     *
+     * @param newPayload new payload to reset.
+     */
+    void resetPayload(Object newPayload);
+
+    /**
      * Return whether the entry represents a hole or not.
      */
     default boolean isHole() {
@@ -128,16 +135,23 @@ public interface ILogData extends IMetadata, Comparable<ILogData> {
     }
 
     /**
-     * Return true if and only if the entry represents a trimmed address.
+     * Return true if this LogData contains data.
      */
-    default boolean isTrimmed() {
-        return getType() == DataType.TRIMMED;
+    default boolean isData() { return  getType() == DataType.DATA; }
+
+    /**
+     * Return true if and only if the entry represents a compacted address.
+     */
+    default boolean isCompacted() {
+        return getType() == DataType.COMPACTED;
     }
 
     /**
-     * Return true if this LogData contains data
+     * Return true if and only if the entry represents a garbage decision.
      */
-    default boolean isData() { return  getType() == DataType.DATA; }
+    default boolean isGarbage() {
+        return getType() == DataType.GARBAGE;
+    }
 
     /**
      * Return the serialized size of an object

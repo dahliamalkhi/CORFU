@@ -1,13 +1,6 @@
 package org.corfudb.protocols.logprotocol;
 
 import io.netty.buffer.ByteBuf;
-
-import java.util.Arrays;
-import java.util.Map;
-import java.util.UUID;
-import java.util.function.Function;
-import java.util.stream.Collectors;
-
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.RequiredArgsConstructor;
@@ -16,6 +9,12 @@ import lombok.ToString;
 import org.corfudb.runtime.CorfuRuntime;
 import org.corfudb.runtime.view.Address;
 import org.corfudb.util.serializer.ICorfuSerializable;
+
+import java.util.Arrays;
+import java.util.Map;
+import java.util.UUID;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 
 /**
@@ -102,10 +101,11 @@ public class LogEntry implements ICorfuSerializable {
     public enum LogEntryType {
         // Base Messages
         NOP(0, LogEntry.class),
-        SMR(1, SMREntry.class),
-        MULTIOBJSMR(7, MultiObjectSMREntry.class),
-        MULTISMR(8, MultiSMREntry.class),
-        CHECKPOINT(10, CheckpointEntry.class);
+        SMRLOG(7, SMRLogEntry.class),
+        CHECKPOINT(10, CheckpointEntry.class),
+
+        // SMRGarbageEntry
+        SMRGARBAGE(11, SMRGarbageEntry.class);
 
         public final int type;
         public final Class<? extends LogEntry> entryType;

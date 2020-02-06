@@ -11,6 +11,7 @@ import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.corfudb.protocols.wireprotocol.DataType;
 import org.corfudb.protocols.wireprotocol.ILogData;
+import org.corfudb.protocols.wireprotocol.LogData;
 import org.corfudb.runtime.CorfuRuntime;
 import org.corfudb.runtime.view.Address;
 import org.corfudb.util.Utils;
@@ -128,8 +129,7 @@ public abstract class AbstractContextStreamView<T extends AbstractStreamContext>
         }
 
         // Get the next entry from the underlying implementation.
-        final ILogData entry =
-                getNextEntry(getCurrentContext(), maxGlobal);
+        ILogData entry = getNextEntry(getCurrentContext(), maxGlobal);
 
         if (entry != null) {
             // Update the pointer.
@@ -169,7 +169,7 @@ public abstract class AbstractContextStreamView<T extends AbstractStreamContext>
             // We've resolved up to maxGlobal, so remember it. (if it wasn't max)
             if (maxGlobal != Address.MAX) {
                 // Set Global Pointer and check that it is not pointing to an address in the trimmed space.
-                getCurrentContext().setGlobalPointerCheckGCTrimMark(maxGlobal);
+                getCurrentContext().setGlobalPointer(maxGlobal);
             }
             return entries;
         }
@@ -194,11 +194,10 @@ public abstract class AbstractContextStreamView<T extends AbstractStreamContext>
         // Otherwise update the pointer
         if (maxGlobal != Address.MAX) {
             // Set Global Pointer and check that it is not pointing to an address in the trimmed space.
-            getCurrentContext().setGlobalPointerCheckGCTrimMark(maxGlobal);
+            getCurrentContext().setGlobalPointer(maxGlobal);
         } else {
             // Update pointer from log data and then validate final position of the pointer against GC trim mark.
             updatePointer(entries.get(entries.size() - 1));
-            getCurrentContext().validateGlobalPointerPosition(getCurrentGlobalPosition());
         }
 
         // And return the entries.
@@ -251,6 +250,7 @@ public abstract class AbstractContextStreamView<T extends AbstractStreamContext>
         ILogData thisData;
 
         while ((thisData = getNextEntry(context, maxGlobal)) != null) {
+
             // Add this read to the list of reads to return.
             dataList.add(thisData);
 
@@ -262,6 +262,7 @@ public abstract class AbstractContextStreamView<T extends AbstractStreamContext>
             if (contextCheckFn.apply(thisData)) {
                 break;
             }
+
         }
 
         return dataList;
@@ -283,8 +284,8 @@ public abstract class AbstractContextStreamView<T extends AbstractStreamContext>
      * @param data  The entry to use to update the pointer.
      */
     private void updatePointer(final ILogData data) {
-        // Update the global pointer, if it is non-checkpoint data.
-        if (data.getType() == DataType.DATA && !data.hasCheckpointMetadata()) {
+        // Update the global pointer
+        if (data.getType() == DataType.DATA) {
             // Note: here we only set the global pointer and do not validate its position with respect to the trim mark,
             // as the pointer is expected to be moving step by step (for instance when syncing a stream up to maxGlobal)
             // The validation is deferred to these methods which call it in advance based on the expected final position
@@ -325,5 +326,10 @@ public abstract class AbstractContextStreamView<T extends AbstractStreamContext>
     @Override
     public String toString() {
         return Utils.toReadableId(baseContext.id) + "@" + getCurrentContext().getGlobalPointer();
+    }
+
+    @Override
+    public long getCompactionMark() {
+        return runtime.getAddressSpaceView().getCompactionMark().get();
     }
 }

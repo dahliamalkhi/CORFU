@@ -1,23 +1,26 @@
 package org.corfudb.util;
 
-
 import jdk.internal.org.objectweb.asm.util.Printer;
 import jdk.internal.org.objectweb.asm.util.Textifier;
 import jdk.internal.org.objectweb.asm.util.TraceMethodVisitor;
 import lombok.extern.slf4j.Slf4j;
-import org.corfudb.runtime.view.stream.StreamAddressSpace;
 import org.corfudb.protocols.wireprotocol.StreamsAddressResponse;
 import org.corfudb.protocols.wireprotocol.TailsResponse;
 import org.corfudb.runtime.CorfuRuntime;
 import org.corfudb.runtime.view.Address;
 import org.corfudb.runtime.view.Layout;
+import org.corfudb.runtime.view.stream.StreamAddressSpace;
 
 import java.text.DecimalFormat;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.stream.Collectors;
+
 /**
  * Created by crossbach on 5/22/15.
  */
@@ -172,6 +175,41 @@ public class Utils {
     }
 
     /**
+     * Attempt to get the maximum committed log tail from all log units.
+     *
+     * @return the maximum committed tail from all log units
+     */
+    public static long getCommittedTail(Layout layout, CorfuRuntime runtime) {
+        // Send the requests to all log units in parallel to get the committed tails.
+        Set<String> allLogUnits = layout.getAllLogServers();
+        List<CompletableFuture<Long>> futures = allLogUnits.stream()
+                .map(lu -> runtime.getLayoutView().getRuntimeLayout(layout)
+                        .getLogUnitClient(lu)
+                        .getCommittedTail())
+                .collect(Collectors.toList());
+
+        // Aggregate and get the maximum of committed tail.
+        return futures.stream()
+                .map(CFUtils::getUninterruptibly)
+                .reduce(Address.NON_ADDRESS, Long::max);
+    }
+
+    public static void updateCommittedTail(Layout layout, CorfuRuntime runtime,
+                                           long newCommittedTail) {
+        // Send the new committed tail to the log units that are present in
+        // all the address segments since they have the complete state.
+        Set<String> logServers = layout.getAllLogServers();
+        List<CompletableFuture<Void>> futures = logServers.stream()
+                .map(ls -> runtime.getLayoutView().getRuntimeLayout(layout)
+                        .getLogUnitClient(ls)
+                        .updateCommittedTail(newCommittedTail))
+                .collect(Collectors.toList());
+
+        // Wait until all futures completed, exceptions will be wrapped in RuntimeException.
+        futures.forEach(CFUtils::getUninterruptibly);
+    }
+
+    /**
      * Given a set of request tails, we aggregate them and maintain
      * the greatest address per stream and the greatest tail over
      * all responses.
@@ -198,9 +236,7 @@ public class Utils {
                                                                    Map<UUID, StreamAddressSpace> aggregated) {
         for (Map.Entry<UUID, StreamAddressSpace> stream : streamAddressSpaceMap.entrySet()) {
             if (aggregated.containsKey(stream.getKey())) {
-                long currentTrimMark = aggregated.get(stream.getKey()).getTrimMark();
                 aggregated.get(stream.getKey()).getAddressMap().or(stream.getValue().getAddressMap());
-                aggregated.get(stream.getKey()).setTrimMark(Math.max(currentTrimMark, stream.getValue().getTrimMark()));
             } else {
                 aggregated.put(stream.getKey(), stream.getValue());
             }

@@ -4,8 +4,8 @@ import com.codahale.metrics.MetricRegistry;
 import com.codahale.metrics.Timer;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
-import org.corfudb.protocols.logprotocol.MultiObjectSMREntry;
-import org.corfudb.protocols.logprotocol.SMREntry;
+import org.corfudb.protocols.logprotocol.SMRLogEntry;
+import org.corfudb.protocols.logprotocol.SMRRecord;
 import org.corfudb.protocols.wireprotocol.Token;
 import org.corfudb.protocols.wireprotocol.TokenResponse;
 import org.corfudb.protocols.wireprotocol.TxResolutionInfo;
@@ -197,33 +197,25 @@ public abstract class AbstractTransactionalContext implements
                                     Token snapshotTimestamp,
                                     ICorfuSMRProxyInternal proxy,
                                     @Nullable Runnable optimisticStreamSetter) {
-        for (int x = 0; x < this.transaction.getRuntime().getParameters().getTrimRetry(); x++) {
-            try {
-                if (optimisticStreamSetter != null) {
-                    // Swap ourselves to be the active optimistic stream.
-                    // Inside setAsOptimisticStream, if there are
-                    // currently optimistic updates on the object, we
-                    // roll them back.  Then, we set this context as  the
-                    // object's new optimistic context.
-                    optimisticStreamSetter.run();
-                }
-                vlo.syncObjectUnsafe(snapshotTimestamp.getSequence());
-                break;
-            } catch (TrimmedException te) {
-                // If a trim is encountered, we must reset the object
-                vlo.resetUnsafe();
-                if (!te.isRetriable()
-                        || x == this.transaction.getRuntime().getParameters().getTrimRetry() - 1) {
-                    // abort the transaction
-                    TransactionAbortedException tae =
-                            new TransactionAbortedException(
-                                    new TxResolutionInfo(getTransactionID(), snapshotTimestamp),
-                                    TokenResponse.NO_CONFLICT_KEY, proxy.getStreamID(),
-                                    Address.NON_ADDRESS, AbortCause.TRIM, te, this);
-                    abortTransaction(tae);
-                    throw tae;
-                }
+        try {
+            if (optimisticStreamSetter != null) {
+                // Swap ourselves to be the active optimistic stream.
+                // Inside setAsOptimisticStream, if there are
+                // currently optimistic updates on the object, we
+                // roll them back.  Then, we set this context as  the
+                // object's new optimistic context.
+                optimisticStreamSetter.run();
             }
+            vlo.syncObjectUnsafe(snapshotTimestamp.getSequence());
+        } catch (TrimmedException te) {
+            // abort the transaction
+            TransactionAbortedException tae =
+                    new TransactionAbortedException(
+                            new TxResolutionInfo(getTransactionID(), snapshotTimestamp),
+                            TokenResponse.NO_CONFLICT_KEY, proxy.getStreamID(),
+                            Address.NON_ADDRESS, AbortCause.TRIM, te, this);
+            abortTransaction(tae);
+            throw tae;
         }
     }
 
@@ -231,13 +223,13 @@ public abstract class AbstractTransactionalContext implements
      * Log an SMR update to the Corfu log.
      *
      * @param proxy          The proxy which generated the update.
-     * @param updateEntry    The entry which we are writing to the log.
+     * @param updateRecord   The record which we are writing to the log.
      * @param conflictObject Fine-grained conflict information, if available.
      * @param <T>            The type of the proxy's underlying object.
      * @return The address the update was written at.
      */
     public abstract <T extends ICorfuSMR<T>> long logUpdate(ICorfuSMRProxyInternal<T> proxy,
-                                                             SMREntry updateEntry,
+                                                             SMRRecord updateRecord,
                                                              Object[] conflictObject);
 
     /**
@@ -282,6 +274,7 @@ public abstract class AbstractTransactionalContext implements
             // If we're in a nested transaction, the first read timestamp
             // needs to come from the root.
             Token parentTimestamp = parentCtx.getSnapshotTimestamp();
+
             log.trace("obtainSnapshotTimestamp: inheriting parent snapshot" +
                     " SnapshotTimestamp[{}] {}", this, parentTimestamp);
             return parentTimestamp;
@@ -297,6 +290,7 @@ public abstract class AbstractTransactionalContext implements
                     .getSequencerView()
                     .query()
                     .getToken();
+
             log.trace("obtainSnapshotTimestamp: sequencer SnapshotTimestamp[{}] {}", this, timestamp);
             return timestamp;
         }
@@ -326,14 +320,14 @@ public abstract class AbstractTransactionalContext implements
      * Add an update to the transaction optimistic write-set.
      *
      * @param proxy           the SMR object for this update
-     * @param updateEntry     the update
+     * @param updateRecord    the update
      * @param conflictObjects the conflict objects to add
      * @return a synthetic "address" in the write-set, to be used for
      *     checking upcall results
      */
-    long addToWriteSet(ICorfuSMRProxyInternal proxy, SMREntry updateEntry, Object[]
+    long addToWriteSet(ICorfuSMRProxyInternal proxy, SMRRecord updateRecord, Object[]
             conflictObjects) {
-        return getWriteSetInfo().add(proxy, updateEntry, conflictObjects);
+        return getWriteSetInfo().add(proxy, updateRecord, conflictObjects);
     }
 
     void mergeWriteSetInto(WriteSetInfo other) {
@@ -341,11 +335,11 @@ public abstract class AbstractTransactionalContext implements
     }
 
     /**
-     * convert our write set into a new MultiObjectSMREntry.
+     * convert our write set into a new SMRLogEntry.
      *
      * @return  the write set
      */
-    MultiObjectSMREntry collectWriteSetEntries() {
+    SMRLogEntry collectWriteSetEntries() {
         return getWriteSetInfo().getWriteSet();
     }
 
@@ -355,7 +349,7 @@ public abstract class AbstractTransactionalContext implements
      * @param id The stream to get a append set for.
      * @return The append set for that stream, as an ordered list.
      */
-    List<SMREntry> getWriteSetEntryList(UUID id) {
+    List<SMRRecord> getWriteSetEntryList(UUID id) {
         return getWriteSetInfo().getWriteSet().getSMRUpdates(id);
     }
 

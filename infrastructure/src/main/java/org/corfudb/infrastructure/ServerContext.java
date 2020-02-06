@@ -1,13 +1,34 @@
 package org.corfudb.infrastructure;
 
-import static org.corfudb.util.MetricsUtils.isMetricsReportingSetUp;
-
 import com.codahale.metrics.MetricRegistry;
 import com.google.common.collect.Sets;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
-
 import io.netty.channel.EventLoopGroup;
+import lombok.AccessLevel;
+import lombok.Getter;
+import lombok.Setter;
+import lombok.extern.slf4j.Slf4j;
+import org.corfudb.comm.ChannelImplementation;
+import org.corfudb.infrastructure.datastore.DataStore;
+import org.corfudb.infrastructure.datastore.KvDataStore.KvRecord;
+import org.corfudb.infrastructure.log.CompactionPolicy.CompactionPolicyType;
+import org.corfudb.infrastructure.log.StreamLogDataStore;
+import org.corfudb.infrastructure.log.StreamLogParams;
+import org.corfudb.infrastructure.paxos.PaxosDataStore;
+import org.corfudb.protocols.wireprotocol.PriorityLevel;
+import org.corfudb.protocols.wireprotocol.failuredetector.FailureDetectorMetrics;
+import org.corfudb.runtime.CorfuRuntime;
+import org.corfudb.runtime.CorfuRuntime.CorfuRuntimeParameters;
+import org.corfudb.runtime.exceptions.WrongEpochException;
+import org.corfudb.runtime.view.ConservativeFailureHandlerPolicy;
+import org.corfudb.runtime.view.IReconfigurationHandlerPolicy;
+import org.corfudb.runtime.view.Layout;
+import org.corfudb.runtime.view.Layout.LayoutSegment;
+import org.corfudb.util.MetricsUtils;
+import org.corfudb.util.NodeLocator;
+import org.corfudb.util.UuidUtils;
 
+import javax.annotation.Nonnull;
 import java.io.File;
 import java.nio.file.Files;
 import java.time.Duration;
@@ -24,29 +45,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import javax.annotation.Nonnull;
-
-import lombok.AccessLevel;
-import lombok.Getter;
-import lombok.Setter;
-import lombok.extern.slf4j.Slf4j;
-
-import org.corfudb.comm.ChannelImplementation;
-import org.corfudb.infrastructure.datastore.DataStore;
-import org.corfudb.infrastructure.datastore.KvDataStore.KvRecord;
-import org.corfudb.infrastructure.paxos.PaxosDataStore;
-import org.corfudb.protocols.wireprotocol.PriorityLevel;
-import org.corfudb.protocols.wireprotocol.failuredetector.FailureDetectorMetrics;
-import org.corfudb.runtime.CorfuRuntime;
-import org.corfudb.runtime.CorfuRuntime.CorfuRuntimeParameters;
-import org.corfudb.runtime.exceptions.WrongEpochException;
-import org.corfudb.runtime.view.ConservativeFailureHandlerPolicy;
-import org.corfudb.runtime.view.IReconfigurationHandlerPolicy;
-import org.corfudb.runtime.view.Layout;
-import org.corfudb.runtime.view.Layout.LayoutSegment;
-import org.corfudb.util.MetricsUtils;
-import org.corfudb.util.NodeLocator;
-import org.corfudb.util.UuidUtils;
+import static org.corfudb.util.MetricsUtils.isMetricsReportingSetUp;
 
 /**
  * Server Context:
@@ -668,6 +667,53 @@ public class ServerContext implements AutoCloseable {
         } else {
             return prefix + "-";
         }
+    }
+
+    private int getCompactionWorkerThreads() {
+        int requested = Integer.parseInt(getServerConfig(String.class, "--compaction-worker-threads"));
+        if (requested != 0) {
+            return requested;
+        }
+
+        return Runtime.getRuntime().availableProcessors();
+    }
+
+    private int getProtectedSegments() {
+        int protectedSegments = Integer.parseInt(getServerConfig(String.class, "--protected-segments"));
+        if (protectedSegments < 1) {
+            throw new IllegalArgumentException("Number of protected segments for compaction " +
+                    "should at least be 1.");
+        }
+
+        return protectedSegments;
+    }
+
+    /**
+     * Get a new instance of {@link StreamLogParams} representing the stream log parameters.
+     *
+     * @return an instance of {@link StreamLogParams}
+     */
+    public StreamLogParams getStreamLogParams() {
+        return StreamLogParams.builder()
+                .logPath(getServerConfig(String.class, "--log-path"))
+                .verifyChecksum(!getServerConfig(Boolean.class, "--no-verify"))
+                .logSizeQuotaPercentage(Double.parseDouble(getServerConfig(String.class, "--log-size-quota-percentage")))
+                .maxOpenStreamSegments(Integer.parseInt(getServerConfig(String.class, "--max-open-stream-segments")))
+                .maxOpenGarbageSegments(Integer.parseInt(getServerConfig(String.class, "--max-open-garbage-segments")))
+                .compactionPolicyType(CompactionPolicyType.valueOf(getServerConfig(String.class, "--compaction-policy")))
+                .compactionInitialDelayMin(Integer.parseInt(getServerConfig(String.class, "--compaction-initial-delay")))
+                .compactionPeriodMin(Integer.parseInt(getServerConfig(String.class, "--compaction-period")))
+                .maxSegmentsForCompaction(Integer.parseInt(getServerConfig(String.class, "--max-segments-for-compaction")))
+                .protectedSegments(getProtectedSegments())
+                .compactionWorkers(getCompactionWorkerThreads())
+                .segmentGarbageRatioThreshold(Double.parseDouble(getServerConfig(String.class, "--segment-garbage-ratio-threshold")))
+                .segmentGarbageSizeThresholdMB(Double.parseDouble(getServerConfig(String.class, "--segment-garbage-size-threshold")))
+                .totalGarbageSizeThresholdMB(Double.parseDouble(getServerConfig(String.class, "--total-garbage-size-threshold")))
+                .build();
+    }
+
+    public StreamLogDataStore getStreamLogDataStore() {
+        return new StreamLogDataStore(dataStore);
     }
 
     /**

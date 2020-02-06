@@ -4,9 +4,13 @@ import com.codahale.metrics.MetricRegistry;
 import com.codahale.metrics.Timer;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
-import org.corfudb.protocols.logprotocol.SMREntry;
+
+import org.corfudb.protocols.logprotocol.SMRRecord;
+import org.corfudb.protocols.logprotocol.SMRRecordLocator;
 import org.corfudb.runtime.CorfuRuntime;
+import org.corfudb.runtime.GarbageInformer;
 import org.corfudb.runtime.exceptions.NoRollbackException;
+import org.corfudb.runtime.exceptions.TrimmedException;
 import org.corfudb.runtime.exceptions.unrecoverable.UnrecoverableCorfuError;
 import org.corfudb.runtime.object.transactions.TransactionalContext;
 import org.corfudb.runtime.object.transactions.WriteSetSMRStream;
@@ -17,6 +21,7 @@ import org.corfudb.util.Utils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.ListIterator;
 import java.util.Map;
@@ -24,10 +29,12 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.StampedLock;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
+import java.util.stream.Stream;
 
 //TODO Discard TransactionStream for building maps but not for constructing tails
 
@@ -107,6 +114,16 @@ public class VersionLockedObject<T extends ICorfuSMR<T>> {
     private final Map<String, IUndoFunction<T>> undoFunctionMap;
 
     /**
+     * The garbage identification function map for this object.
+     */
+    private final Map<String, IGarbageIdentificationFunction> garbageIdentifyFunctionMap;
+
+    /**
+     * The garbage identification decisions are exposed outside runtime via garbageInformer.
+     */
+    private final GarbageInformer garbageInformer;
+
+    /**
      * The reset set for this object.
      */
     private final Set<String> resetSet;
@@ -122,6 +139,22 @@ public class VersionLockedObject<T extends ICorfuSMR<T>> {
     private final Logger correctnessLogger = LoggerFactory.getLogger("correctness");
 
     /**
+     * The largest address that the stream is synced to.
+     */
+    private long syncTail = Address.NON_ADDRESS;
+
+    /**
+     * A flag indicates that the object is just reset and during its syncing the locator information should be
+     * updated but not be added to garbage informer.
+     */
+    private boolean resetSyncMode = false;
+
+    /**
+     * Corfu runtime
+     */
+    private final CorfuRuntime rt;
+
+    /**
      * The VersionLockedObject maintains a versioned object which is backed by an ISMRStream,
      * and is optionally backed by an additional optimistic update stream.
      *
@@ -130,21 +163,33 @@ public class VersionLockedObject<T extends ICorfuSMR<T>> {
      */
     public VersionLockedObject(Supplier<T> newObjectFn,
                                StreamViewSMRAdapter smrStream,
-                               ICorfuSMR<T> wrapperObject) {
+                               ICorfuSMR<T> wrapperObject,
+                               GarbageInformer garbageInformer,
+                               CorfuRuntime rt) {
         this.smrStream = smrStream;
 
         this.upcallTargetMap = wrapperObject.getCorfuSMRUpcallMap();
         this.undoRecordFunctionMap = wrapperObject.getCorfuUndoRecordMap();
         this.undoFunctionMap = wrapperObject.getCorfuUndoMap();
         this.resetSet = wrapperObject.getCorfuResetSet();
+        this.garbageIdentifyFunctionMap = wrapperObject.getCorfuGarbageIdentificationMap();
+        this.garbageInformer = garbageInformer;
 
         wrapperObject.closeWrapper();
         this.newObjectFn = newObjectFn;
         this.object = newObjectFn.get();
         this.pendingUpcalls = ConcurrentHashMap.newKeySet();
         this.upcallResults = new ConcurrentHashMap<>();
+        this.rt = rt;
 
         lock = new StampedLock();
+    }
+
+    /**
+     * Execute a method on the version locked object without synchronization
+     */
+    public <R> R passThrough(Function<T, R> method) {
+        return method.apply(object);
     }
 
     /**
@@ -156,19 +201,16 @@ public class VersionLockedObject<T extends ICorfuSMR<T>> {
 
         try (Timer.Context vloGcDuration = VloMetricsHelper.getVloGcContext()) {
             ts = lock.writeLock();
+
+            // pengdingUpcalls and upcallResults before compaction mark will no longer
+            // used by the client
             pendingUpcalls.removeIf(e -> e < trimMark);
             upcallResults.entrySet().removeIf(e -> e.getKey() < trimMark);
+
             smrStream.gc(trimMark);
         } finally {
             lock.unlock(ts);
         }
-    }
-
-    /**
-     * Execute a method on the version locked object without synchronization
-     */
-    public <R> R passThrough(Function<T, R> method) {
-        return method.apply(object);
     }
 
     /**
@@ -292,7 +334,8 @@ public class VersionLockedObject<T extends ICorfuSMR<T>> {
      * @throws NoRollbackException If the object cannot be rolled back to
      *                             the supplied version.
      */
-    public void rollbackObjectUnsafe(long timestamp) {
+    private void rollbackObjectUnsafe(long timestamp) {
+
         if (object.getVersionPolicy() == ICorfuVersionPolicy.MONOTONIC) {
             return; // We are not allowed to go back in time.
         }
@@ -301,12 +344,32 @@ public class VersionLockedObject<T extends ICorfuSMR<T>> {
             return; // We are already behind the timestamp.
         }
 
+        log.trace("Rollback[{}] to {}", this, timestamp);
+
+
+        // An TrimmedException is thrown for some reasons:
+        //
+        // 1. Addresses before compaction mark may have been trim to prevent memory leak.
+        //    In this case, rolling back is limit by compaction mark to insure correctness.
+        //
+        // 2. Let us assume we do not trim resolved addresses in the stream layer.
+        // Aggressively throwing trimmedException is still beneficial to some extent.
+        // Rolling back is implemented by applying undo record one by one. In the middle
+        // of rolling back, if the client needs to read data from the log unit if the
+        // data is not presented in the cache, the client will throw trimmedException
+        // which makes the previous effort in vain.
+        long compactionMark = rt.getAddressSpaceView().getCompactionMark().get();
+        if (Address.isAddress(timestamp) && compactionMark > timestamp) {
+            log.trace("Rollback[{}] aborted", this);
+            throw new TrimmedException(String.format("snapshot: %d, compaction mark: %d",
+                    timestamp, compactionMark));
+        }
+
         try {
-            log.trace("Rollback[{}] to {}", this, timestamp);
             rollbackStreamUnsafe(smrStream, timestamp);
             log.trace("Rollback[{}] completed", this);
-        } catch (NoRollbackException nre) {
-            log.warn("SyncObjectUnsafe[{}] to {} failed {}", this, timestamp, nre);
+        } catch (NoRollbackException ex) {
+            log.warn("Rollback[{}] failed", this);
             resetUnsafe();
         }
     }
@@ -399,7 +462,7 @@ public class VersionLockedObject<T extends ICorfuSMR<T>> {
      *                   saved, false otherwise.
      * @return The address the update was logged at.
      */
-    public long logUpdate(SMREntry entry, boolean saveUpcall) {
+    public long logUpdate(SMRRecord entry, boolean saveUpcall) {
         return smrStream.append(entry,
                 t -> {
                     if (saveUpcall) {
@@ -427,7 +490,7 @@ public class VersionLockedObject<T extends ICorfuSMR<T>> {
      *
      * @return True, if the object was modified by this thread. False otherwise.
      */
-    public boolean optimisticallyOwnedByThreadUnsafe() {
+    private boolean optimisticallyOwnedByThreadUnsafe() {
         return optimisticStream != null && optimisticStream.isStreamForThisThread();
     }
 
@@ -470,6 +533,7 @@ public class VersionLockedObject<T extends ICorfuSMR<T>> {
         object = newObjectFn.get();
         smrStream.reset();
         optimisticStream = null;
+        resetSyncMode = true;
     }
 
     /**
@@ -519,28 +583,27 @@ public class VersionLockedObject<T extends ICorfuSMR<T>> {
     /**
      * Given a SMR entry with an undo entry, undo the update.
      *
-     * @param entry The entry to undo.
+     * @param record The record to undo.
      */
-    private void applyUndoRecordUnsafe(SMREntry entry, ISMRStream stream) {
-        log.trace("Undo[{}] of {}@{} ({})", this, entry.getSMRMethod(),
-                Address.isAddress(entry.getGlobalAddress()) ? entry.getGlobalAddress() : "OPT",
-                entry.getUndoRecord());
-        IUndoFunction<T> undoFunction = undoFunctionMap.get(entry.getSMRMethod());
+    private void applyUndoRecordUnsafe(SMRRecord record, ISMRStream stream) {
+        log.trace("Undo[{}] of {}@{} ({})", this, record.getSMRMethod(),
+                Address.isAddress(record.getGlobalAddress()) ? record.getGlobalAddress() : "OPT",
+                record.getUndoRecord());
+        IUndoFunction<T> undoFunction = undoFunctionMap.get(record.getSMRMethod());
         ICorfuExecutionContext.Context context = getContext(stream);
 
         // If the undo function exists, apply it.
         if (undoFunction != null) {
             undoFunction.doUndo(
                     object.getContext(context),
-                    entry.getUndoRecord(), entry.getSMRArguments());
+                    record.getUndoRecord(), record.getSMRArguments());
             return;
-        } else if (resetSet.contains(entry.getSMRMethod())) {
-            // If this is a reset, undo by restoring the
-            // previous state.
-            object = (T) entry.getUndoRecord();
+        } else if (resetSet.contains(record.getSMRMethod())) {
+            // If this is a reset, undo by restoring the previous state.
+            object = (T) record.getUndoRecord();
             // clear the undo record, since it is now
             // consumed (the object may change)
-            entry.clearUndoRecord();
+            record.clearUndoRecord();
             return;
         }
         // Otherwise we don't know how to undo,
@@ -568,40 +631,43 @@ public class VersionLockedObject<T extends ICorfuSMR<T>> {
     /**
      * Apply an SMR update to the object, possibly optimistically.
      *
-     * @param entry The entry to apply.
+     * @param record The SMR record to apply.
      */
-    private Object applyUpdateUnsafe(SMREntry entry, long timestamp) {
-        log.trace("Apply[{}] of {}@{} ({})", this, entry.getSMRMethod(),
-                Address.isAddress(entry.getGlobalAddress()) ? entry.getGlobalAddress() : "OPT",
-                entry.getSMRArguments());
+    private Object applyUpdateUnsafe(SMRRecord record, long timestamp) {
+        log.trace("Apply[{}] of {}@{} ({})", this, record.getSMRMethod(),
+                Address.isAddress(record.getGlobalAddress()) ? record.getGlobalAddress() : "OPT",
+                record.getSMRArguments());
 
-        ICorfuSMRUpcallTarget<T> target = upcallTargetMap.get(entry.getSMRMethod());
+        ICorfuSMRUpcallTarget<T> target = upcallTargetMap.get(record.getSMRMethod());
         if (target == null) {
-            throw new RuntimeException("Unknown upcall " + entry.getSMRMethod());
+            throw new RuntimeException("Unknown upcall " + record.getSMRMethod());
         }
 
-        ICorfuExecutionContext.Context context = getContext(timestamp);
 
-        // Calculate an undo record if no undo record is present -OR- there
-        // is an optimistic entry, (which has no valid global address).
+        ICorfuExecutionContext.Context context = getContext(timestamp);
+        // calculate an undo record if no undo record is present and its
+        // global address is smaller than compaction mark -OR- there
+        // is an optimistic record, (which has no valid global address).
         // In the case of optimistic entries, the snapshot may have changed
         // since the last time they were applied, so we need to recalculate
         // undo -- this is the case without snapshot isolation.
-        if (!entry.isUndoable() || !Address.isAddress(entry.getGlobalAddress())) {
+        if (!Address.isAddress(record.getGlobalAddress()) ||
+                !record.isUndoable() &&
+                        record.getGlobalAddress() >= rt.getAddressSpaceView().getCompactionMark().get()) {
             // Can we generate an undo record?
             IUndoRecordFunction<T> undoRecordTarget =
-                    undoRecordFunctionMap.get(entry.getSMRMethod());
-            // If there was no previously calculated undo entry
+                    undoRecordFunctionMap.get(record.getSMRMethod());
+            // If there was no previously calculated undo record
             if (undoRecordTarget != null) {
                 // Calculate the undo record.
-                entry.setUndoRecord(undoRecordTarget
-                        .getUndoRecord(object.getContext(context), entry.getSMRArguments()));
-                log.trace("Apply[{}] Undo->{}", this, entry.getUndoRecord());
-            } else if (resetSet.contains(entry.getSMRMethod())) {
-                // This entry actually resets the object. So here
+                record.setUndoRecord(undoRecordTarget
+                        .getUndoRecord(object.getContext(context), record.getSMRArguments()));
+                log.trace("Apply[{}] Undo->{}", this, record.getUndoRecord());
+            } else if (resetSet.contains(record.getSMRMethod())) {
+                // This record actually resets the object. So here
                 // we can safely get a new instance, and add the
                 // previous instance to the undo log.
-                entry.setUndoRecord(object);
+                record.setUndoRecord(object);
                 object.close();
                 object = newObjectFn.get();
                 log.trace("Apply[{}] Undo->RESET", this);
@@ -609,7 +675,7 @@ public class VersionLockedObject<T extends ICorfuSMR<T>> {
         }
 
         // Now invoke the upcall
-        return target.upcall(object.getContext(context), entry.getSMRArguments());
+        return target.upcall(object.getContext(context), record.getSMRArguments());
     }
 
     /**
@@ -619,31 +685,31 @@ public class VersionLockedObject<T extends ICorfuSMR<T>> {
      * @param stream          The stream of SMR updates to apply in
      *                        reverse order.
      * @param rollbackVersion The version to stop roll back at.
-     * @throws NoRollbackException If an entry in the stream did not contain
+     * @throws NoRollbackException If an record in the stream did not contain
      *                             undo information.
      */
-    protected void rollbackStreamUnsafe(ISMRStream stream, long rollbackVersion) {
+    private void rollbackStreamUnsafe(ISMRStream stream, long rollbackVersion) {
         // If we're already at or before the given version, there's
         // nothing to do
         if (stream.pos() <= rollbackVersion) {
             return;
         }
 
-        List<SMREntry> entries = stream.current();
+        List<SMRRecord> entries = stream.current();
 
         while (!entries.isEmpty()) {
-            if (entries.stream().allMatch(SMREntry::isUndoable)) {
+            if (entries.stream().allMatch(SMRRecord::isUndoable)) {
                 // start from the end, process one at a time
-                ListIterator<SMREntry> it = entries.listIterator(entries.size());
+                ListIterator<SMRRecord> it = entries.listIterator(entries.size());
                 while (it.hasPrevious()) {
                     applyUndoRecordUnsafe(it.previous(), stream);
                 }
             } else {
-                Optional<SMREntry> entry = entries.stream().findFirst();
+                Optional<SMRRecord> entry = entries.stream().findFirst();
                 if (log.isTraceEnabled()) {
                     log.trace("rollbackStreamUnsafe: one or more stream entries in address @{} are not undoable. " +
                                     "Undoable entries: {}/{}", stream.pos(),
-                            (int) entries.stream().filter(SMREntry::isUndoable).count(),
+                            (int) entries.stream().filter(SMRRecord::isUndoable).count(),
                             entries.size());
                 }
                 throw new NoRollbackException(entry, stream.pos(), rollbackVersion);
@@ -674,29 +740,93 @@ public class VersionLockedObject<T extends ICorfuSMR<T>> {
      * @param stream    The stream to sync forward
      * @param timestamp The timestamp to sync up to.
      */
-    protected void syncStreamUnsafe(ISMRStream stream, long timestamp) {
+    private void syncStreamUnsafe(ISMRStream stream, long timestamp) {
         log.trace("Sync[{}] {}", this, (timestamp == Address.OPTIMISTIC)
                 ? "Optimistic" : "to " + timestamp);
         long syncTo = (timestamp == Address.OPTIMISTIC) ? Address.MAX : timestamp;
-        stream.streamUpTo(syncTo)
-                .forEachOrdered(entry -> {
+
+        Stream<SMRRecord> smrRecordStream = stream.streamUpTo(syncTo);
+        applyUpdateStreamUnsafe(smrRecordStream, timestamp);
+    }
+
+    private void applyUpdateStreamUnsafe(Stream<SMRRecord> smrRecordStream, long timestamp) {
+        // AtomicLong is used as a container to bypass the restriction of lambda expression
+        final AtomicLong lastSyncAddress = new AtomicLong(Address.NON_ADDRESS);
+        boolean isOptimistic = timestamp == Address.OPTIMISTIC;
+        List<SMRRecordLocator> garbageLocators = new ArrayList<>();
+
+
+        smrRecordStream
+                .forEachOrdered(record -> {
                     try {
-                        Object res = applyUpdateUnsafe(entry, timestamp);
-                        if (timestamp == Address.OPTIMISTIC) {
-                            entry.setUpcallResult(res);
-                        } else if (pendingUpcalls.contains(entry.getGlobalAddress())) {
-                            log.debug("Sync[{}] Upcall Result {}",
-                                    this, entry.getGlobalAddress());
-                            upcallResults.put(entry.getGlobalAddress(), res == null
-                                    ? NullValue.NULL_VALUE : res);
-                            pendingUpcalls.remove(entry.getGlobalAddress());
+                        Object res = applyUpdateUnsafe(record, timestamp);
+                        if (isOptimistic) {
+                            record.setUpcallResult(res);
+                        } else { // materialized log
+                            if (pendingUpcalls.contains(record.getGlobalAddress())) {
+                                log.debug("Sync[{}] Upcall Result {}",
+                                        this, record.getGlobalAddress());
+                                upcallResults.put(record.getGlobalAddress(), res == null
+                                        ? NullValue.NULL_VALUE : res);
+                                pendingUpcalls.remove(record.getGlobalAddress());
+                            }
+
+                            // Record with global address larger than lastSyncAddress indicates that all SMRRecords
+                            // from last global address has been applied. Therefore, syncTail could be updated.
+                            if (lastSyncAddress.get() != Address.NON_ADDRESS &&
+                                    record.getGlobalAddress() > lastSyncAddress.get()) {
+                                syncTail = Math.max(syncTail, lastSyncAddress.get());
+
+                                // flush garbage if there is garbage
+                                if (!garbageLocators.isEmpty()) {
+                                    // vlo prevent concurrent access
+                                    // to garbageReceivingQueue to maintain order by marker address.
+                                    garbageInformer.addUnsafe(syncTail, garbageLocators);
+                                    garbageLocators.clear();
+                                }
+                            }
+
+                            // to check whether the SMRRecord is first encountered by VLO
+                            if (record.getGlobalAddress() > syncTail || resetSyncMode) {
+                                IGarbageIdentificationFunction garbageIdentifyFunction =
+                                        garbageIdentifyFunctionMap.get(record.getSMRMethod());
+                                if (garbageIdentifyFunction != null) {
+                                    List<Object> garbage =
+                                            garbageIdentifyFunction.identify(record.locator, record.getSMRArguments());
+
+                                    // not adds garbage decisions if at resetSync mode because the garbage decisions
+                                    // may be wrong.
+                                    if (record.getGlobalAddress() > syncTail) {
+                                        // reset the flag after reaching syncTail
+                                        resetSyncMode = false;
+                                        garbage.forEach(o ->
+                                                garbageLocators.add((SMRRecordLocator) o));
+                                    }
+                                }
+
+                                lastSyncAddress.set(record.getGlobalAddress());
+                            }
                         }
-                        entry.setUpcallResult(res);
+
+                        record.setUpcallResult(res);
                     } catch (Exception e) {
                         log.error("Sync[{}] Error: Couldn't execute upcall due to {}", this, e);
                         throw new UnrecoverableCorfuError(e);
                     }
                 });
+
+
+        // update syncTail after applying all SMRRecords. 
+        if (!isOptimistic) {
+            syncTail = Math.max(syncTail, lastSyncAddress.get());
+
+            // flush garbage if there is garbage
+            if (!garbageLocators.isEmpty()) {
+                // vlo prevent concurrent access
+                // to garbageReceivingQueue to maintain order by marker address.
+                garbageInformer.addUnsafe(syncTail, garbageLocators);
+            }
+        }
     }
 
     /**
@@ -715,13 +845,13 @@ public class VersionLockedObject<T extends ICorfuSMR<T>> {
         }
     }
 
-    /** Apply an SMREntry to the version object, while
+    /** Apply an SMRRecord to the version object, while
      * doing bookkeeping for the underlying stream.
      *
-     * @param entry smr entry
+     * @param updates smr records
      */
-    public void applyUpdateToStreamUnsafe(SMREntry entry, long globalAddress) {
-        applyUpdateUnsafe(entry, globalAddress);
+    public void applyUpdatesToStreamUnsafe(List<SMRRecord> updates, long globalAddress) {
+        applyUpdateStreamUnsafe(updates.stream(), globalAddress);
         seek(globalAddress + 1);
     }
 

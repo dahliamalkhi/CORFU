@@ -21,10 +21,9 @@ import org.corfudb.infrastructure.log.StreamLog;
 import org.corfudb.protocols.wireprotocol.CorfuPayloadMsg;
 import org.corfudb.protocols.wireprotocol.LogData;
 import org.corfudb.protocols.wireprotocol.PriorityLevel;
-import org.corfudb.protocols.wireprotocol.RangeWriteMsg;
+import org.corfudb.protocols.wireprotocol.MultipleWriteMsg;
 import org.corfudb.protocols.wireprotocol.TailsRequest;
 import org.corfudb.protocols.wireprotocol.TailsResponse;
-import org.corfudb.protocols.wireprotocol.TrimRequest;
 import org.corfudb.protocols.wireprotocol.WriteRequest;
 import org.corfudb.runtime.exceptions.QuotaExceededException;
 import org.corfudb.runtime.exceptions.WrongEpochException;
@@ -130,6 +129,7 @@ public class BatchProcessor implements AutoCloseable {
                 } else if (currOp == BatchWriterOperation.SHUTDOWN) {
                     log.warn("Shutting down the write processor");
                     streamLog.sync(true);
+                    streamLog.close();
                     break;
                 } else if (streamLog.quotaExceeded() && currOp.getMsg().getPriorityLevel() != PriorityLevel.HIGH) {
                     currOp.getFutureResult().completeExceptionally(
@@ -152,17 +152,17 @@ public class BatchProcessor implements AutoCloseable {
                 } else {
                     try {
                         switch (currOp.getType()) {
-                            case PREFIX_TRIM:
-                                TrimRequest prefixTrim = (TrimRequest) currOp.getMsg().getPayload();
-                                streamLog.prefixTrim(prefixTrim.getAddress().getSequence());
-                                break;
                             case WRITE:
                                 WriteRequest write = (WriteRequest) currOp.getMsg().getPayload();
                                 streamLog.append(write.getGlobalAddress(), (LogData) write.getData());
                                 break;
                             case RANGE_WRITE:
-                                RangeWriteMsg writeRange = (RangeWriteMsg) currOp.getMsg().getPayload();
+                                MultipleWriteMsg writeRange = (MultipleWriteMsg) currOp.getMsg().getPayload();
                                 streamLog.append(writeRange.getEntries());
+                                break;
+                            case MULTI_GARBAGE_WRITE:
+                                MultipleWriteMsg garbageEntries = (MultipleWriteMsg) currOp.getMsg().getPayload();
+                                streamLog.append(garbageEntries.getEntries());
                                 break;
                             case RESET:
                                 streamLog.reset();
@@ -195,8 +195,8 @@ public class BatchProcessor implements AutoCloseable {
                                 log.warn("Unknown BatchWriterOperation {}", currOp);
                         }
                     } catch (Exception e) {
-                        log.error("Stream log error. Batch [queue size={}]. StreamLog: [trim mark: {}].",
-                                operationsQueue.size(), streamLog.getTrimMark(), e);
+                        log.error("Stream log error. Batch [queue size={}].",
+                                operationsQueue.size(), e);
                         currOp.getFutureResult().completeExceptionally(e);
                     }
                     res.add(currOp);

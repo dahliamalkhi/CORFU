@@ -2,37 +2,35 @@ package org.corfudb.runtime.clients;
 
 import com.codahale.metrics.MetricRegistry;
 import com.codahale.metrics.Timer;
-
+import com.google.common.annotations.VisibleForTesting;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
-
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
-
 import lombok.Getter;
-
 import org.corfudb.protocols.wireprotocol.CorfuMsgType;
 import org.corfudb.protocols.wireprotocol.DataType;
 import org.corfudb.protocols.wireprotocol.ILogData;
 import org.corfudb.protocols.wireprotocol.IMetadata;
-import org.corfudb.protocols.wireprotocol.LogData;
+import org.corfudb.protocols.wireprotocol.InspectAddressesRequest;
+import org.corfudb.protocols.wireprotocol.InspectAddressesResponse;
 import org.corfudb.protocols.wireprotocol.KnownAddressRequest;
 import org.corfudb.protocols.wireprotocol.KnownAddressResponse;
+import org.corfudb.protocols.wireprotocol.LogData;
 import org.corfudb.protocols.wireprotocol.MultipleReadRequest;
-import org.corfudb.protocols.wireprotocol.RangeWriteMsg;
+import org.corfudb.protocols.wireprotocol.MultipleWriteMsg;
 import org.corfudb.protocols.wireprotocol.ReadRequest;
 import org.corfudb.protocols.wireprotocol.ReadResponse;
 import org.corfudb.protocols.wireprotocol.StreamsAddressResponse;
 import org.corfudb.protocols.wireprotocol.TailsRequest;
 import org.corfudb.protocols.wireprotocol.TailsResponse;
-import org.corfudb.protocols.wireprotocol.Token;
-import org.corfudb.protocols.wireprotocol.TrimRequest;
 import org.corfudb.protocols.wireprotocol.WriteRequest;
 import org.corfudb.runtime.CorfuRuntime;
 import org.corfudb.util.CorfuComponent;
 import org.corfudb.util.serializer.Serializers;
+
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 
 
 /**
@@ -106,27 +104,24 @@ public class LogUnitClient extends AbstractClient {
     }
 
     /**
-     * Sends a request to write a list of addresses.
+     * Sends a request to write a list of entries.
      *
-     * @param range entries to write to the log unit. Must have at least one entry.
+     * @param entries entries to write to the log unit. Must have at least one entry.
      * @return a completable future which returns true on success.
      */
-    public CompletableFuture<Boolean> writeRange(List<LogData> range) {
-        if (range.isEmpty()) {
+    public CompletableFuture<Boolean> writeAll(List<LogData> entries) {
+        if (entries.isEmpty()) {
             throw new IllegalArgumentException("Can't write an empty range");
         }
 
-        long base = range.get(0).getGlobalAddress();
-        for (int x = 0; x < range.size(); x++) {
-            LogData curr = range.get(x);
-            if (!curr.getGlobalAddress().equals(base + x)) {
-                throw new IllegalArgumentException("Entries not in sequential order!");
-            } else if (curr.isEmpty()) {
+        for (int x = 0; x < entries.size(); x++) {
+            LogData curr = entries.get(x);
+            if (curr.isEmpty()) {
                 throw new IllegalArgumentException("Can't write empty entries!");
             }
         }
 
-        return sendMessageWithFuture(CorfuMsgType.RANGE_WRITE.payloadMsg(new RangeWriteMsg(range)));
+        return sendMessageWithFuture(CorfuMsgType.MULTIPLE_WRITE.payloadMsg(new MultipleWriteMsg(entries)));
     }
 
     /**
@@ -188,6 +183,43 @@ public class LogUnitClient extends AbstractClient {
     }
 
     /**
+     * Check if addresses are committed on log unit server, which returns a future
+     * with uncommitted addresses (holes) on the server.
+     *
+     * @param addresses list of global addresses to inspect
+     * @return a completableFuture which returns an InspectAddressesResponse
+     */
+    public CompletableFuture<InspectAddressesResponse> inspectAddresses(List<Long> addresses) {
+        return sendMessageWithFuture(CorfuMsgType.INSPECT_ADDRESSES_REQUEST
+                .payloadMsg(new InspectAddressesRequest(addresses)));
+    }
+
+    /**
+     * Asynchronously read garbage information for a list of addresses from the log unit server.
+     * @param addresses a list of addresses that garbage is from.
+     * @return a completableFuture which return a ReadResponse containing garbage information on completion.
+     */
+    public CompletableFuture<ReadResponse> readGarbageEntries(List<Long> addresses) {
+        return sendMessageWithFuture(
+                CorfuMsgType.MULTIPLE_GARBAGE_REQUEST
+                        .payloadMsg(new MultipleReadRequest(addresses, false)));
+    }
+
+    /**
+     * Sends a request to write a list of garbage decisions.
+     *
+     * @param range entries to write to the log unit. Must have at least one entry.
+     * @return a completable future which returns true on success.
+     */
+    public CompletableFuture<Boolean> writeGarbageEntries(List<LogData> range) {
+        if (range.isEmpty()) {
+            throw new IllegalArgumentException("Can't write an empty range");
+        }
+
+        return sendMessageWithFuture(CorfuMsgType.MULTIPLE_GARBAGE_WRITE.payloadMsg(new MultipleWriteMsg(range)));
+    }
+
+    /**
      * Get the global tail maximum address the log unit has written.
      *
      * @return a CompletableFuture which will complete with the globalTail once
@@ -208,21 +240,40 @@ public class LogUnitClient extends AbstractClient {
     }
 
     /**
+     * Get the committed tail of the log unit.
+     *
+     * @return a CompletableFuture which will complete with the committed tail address once received.
+     */
+    public CompletableFuture<Long> getCommittedTail() {
+        return sendMessageWithFuture(CorfuMsgType.COMMITTED_TAIL_REQUEST.msg());
+    }
+
+    /**
+     * Update the committed tail of the log unit.
+     *
+     * @param committedTail new committed tail to update
+     * @return an empty completableFuture
+     */
+    public CompletableFuture<Void> updateCommittedTail(long committedTail) {
+        return sendMessageWithFuture(CorfuMsgType.UPDATE_COMMITTED_TAIL.payloadMsg(committedTail));
+    }
+
+    /**
+     * Inform the log unit server that the state transfer is finished.
+     *
+     * @return an empty completableFuture
+     */
+    public CompletableFuture<Void> informStateTransferFinished() {
+        return sendMessageWithFuture(CorfuMsgType.INFORM_STATE_TRANSFER_FINISHED.msg());
+    }
+
+    /**
      * Get the address space for all streams in the log.
      *
      * @return A CompletableFuture which will complete with the address space map for all streams.
      */
     public CompletableFuture<StreamsAddressResponse> getLogAddressSpace() {
         return sendMessageWithFuture(CorfuMsgType.LOG_ADDRESS_SPACE_REQUEST.msg());
-    }
-
-    /**
-     * Get the starting address of a log unit.
-     *
-     * @return a CompletableFuture for the starting address
-     */
-    public CompletableFuture<Long> getTrimMark() {
-        return sendMessageWithFuture(CorfuMsgType.TRIM_MARK_REQUEST.msg());
     }
 
     /**
@@ -236,24 +287,6 @@ public class LogUnitClient extends AbstractClient {
                                                                          long endRange) {
         return sendMessageWithFuture(CorfuMsgType.KNOWN_ADDRESS_REQUEST
                 .payloadMsg(new KnownAddressRequest(startRange, endRange)));
-    }
-
-    /**
-     * Send a prefix trim request that will trim the log up to a certain address
-     *
-     * @param address an address to trim up to (i.e. [0, address))
-     * @return an empty completableFuture
-     */
-    public CompletableFuture<Void> prefixTrim(Token address) {
-        return sendMessageWithFuture(CorfuMsgType.PREFIX_TRIM
-                .payloadMsg(new TrimRequest(address)));
-    }
-
-    /**
-     * Send a compact request that will delete the trimmed parts of the log.
-     */
-    public CompletableFuture<Void> compact() {
-        return sendMessageWithFuture(CorfuMsgType.COMPACT_REQUEST.msg());
     }
 
     /**
@@ -272,5 +305,14 @@ public class LogUnitClient extends AbstractClient {
      */
     public CompletableFuture<Boolean> resetLogUnit(long epoch) {
         return sendMessageWithFuture(CorfuMsgType.RESET_LOGUNIT.payloadMsg(epoch));
+    }
+
+    /**
+     * Send a request to run compaction. Compaction should be run periodically at the LogUnit server. This function
+     * triggers compaction externally for test purpose.
+     */
+    @VisibleForTesting
+    public CompletableFuture<Void> compact() {
+        return sendMessageWithFuture(CorfuMsgType.RUN_COMPACTION.msg());
     }
 }

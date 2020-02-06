@@ -6,16 +6,23 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.RemovalNotification;
+import com.google.common.collect.ContiguousSet;
+import com.google.common.collect.DiscreteDomain;
 import com.google.common.collect.Iterables;
+import com.google.common.collect.Range;
 import com.google.common.collect.Sets;
 import com.google.common.util.concurrent.UncheckedExecutionException;
 import io.netty.handler.timeout.TimeoutException;
+import lombok.Getter;
 import lombok.NonNull;
+import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
+import org.corfudb.protocols.logprotocol.SMRGarbageEntry;
 import org.corfudb.protocols.wireprotocol.DataType;
 import org.corfudb.protocols.wireprotocol.ILogData;
 import org.corfudb.protocols.wireprotocol.IToken;
 import org.corfudb.protocols.wireprotocol.LogData;
+import org.corfudb.protocols.wireprotocol.ReadResponse;
 import org.corfudb.protocols.wireprotocol.StreamsAddressResponse;
 import org.corfudb.protocols.wireprotocol.TailsResponse;
 import org.corfudb.protocols.wireprotocol.Token;
@@ -25,11 +32,10 @@ import org.corfudb.runtime.exceptions.NetworkException;
 import org.corfudb.runtime.exceptions.OverwriteCause;
 import org.corfudb.runtime.exceptions.OverwriteException;
 import org.corfudb.runtime.exceptions.QuotaExceededException;
+import org.corfudb.runtime.exceptions.RetryExhaustedException;
 import org.corfudb.runtime.exceptions.StaleTokenException;
-import org.corfudb.runtime.exceptions.TrimmedException;
 import org.corfudb.runtime.exceptions.WriteSizeException;
 import org.corfudb.runtime.exceptions.WrongEpochException;
-import org.corfudb.runtime.exceptions.unrecoverable.UnrecoverableCorfuError;
 import org.corfudb.util.CFUtils;
 import org.corfudb.util.CorfuComponent;
 import org.corfudb.util.MetricsUtils;
@@ -40,7 +46,7 @@ import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Comparator;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -48,9 +54,11 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.NavigableSet;
 import java.util.Set;
-import java.util.concurrent.CompletionException;
+import java.util.TreeMap;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
 
@@ -64,14 +72,23 @@ public class AddressSpaceView extends AbstractView {
 
     private final static long CACHE_KEY_SIZE = MetricsUtils.sizeOf.deepSizeOf(0L);
     private final static long DEFAULT_MAX_CACHE_ENTRIES = 5000;
-    private final static boolean NO_THROW = false;
 
     /**
      * A cache for read results.
      */
     private final Cache<Long, ILogData> readCache;
+
+    static final private Duration GC_INTERVAL = Duration.ofMinutes(30);
+
+    @Getter
+    @Setter
+    private AtomicLong compactionMark = new AtomicLong(Address.NON_ADDRESS);
+
+    private volatile long lastTrimMark = Address.NON_ADDRESS;
+
+    private volatile long lastTrimTime = -1L;
+
     private final ReadOptions defaultReadOptions = ReadOptions.builder()
-            .ignoreTrim(false)
             .waitForHole(true)
             .clientCacheable(true)
             .serverCacheable(true)
@@ -131,17 +148,17 @@ public class AddressSpaceView extends AbstractView {
     }
 
     /**
-     * Remove all log entries that are less than the trim mark
-     */
-    public void gc(long trimMark) {
-        readCache.asMap().entrySet().removeIf(e -> e.getKey() < trimMark);
-    }
-
-    /**
      * Reset all in-memory caches.
      */
     public void resetCaches() {
         readCache.invalidateAll();
+    }
+
+    /**
+     * Remove all log entries that are less than the trim mark
+     */
+    public void gc(long trimMark) {
+        readCache.asMap().entrySet().removeIf(e -> e.getKey() < trimMark);
     }
 
     /**
@@ -158,17 +175,86 @@ public class AddressSpaceView extends AbstractView {
      * @param address
      */
     private void validateStateOfWrittenEntry(long address, @Nonnull ILogData ld) {
-        ILogData logData;
-        try {
-            logData = read(address);
-        } catch (TrimmedException te) {
-            // We cannot know if the write went through or not
-            throw new UnrecoverableCorfuError("We cannot determine state of an update because of a trim.");
-        }
+        ILogData logData = read(address);
 
         if (!logData.equals(ld)){
             throw new OverwriteException(OverwriteCause.DIFF_DATA);
         }
+    }
+
+    /**
+     * Sends garbage decisions to LogUnit servers in a stripe.
+     * @param runtimeLayout Corfu runtime layout.
+     * @param stripeIndex  the index of one stripe in layout.
+     * @param garbageEntries a collection of garbageEntries which contain garbage decisions.
+     */
+    public void writeGarbage(RuntimeLayout runtimeLayout, int stripeIndex,
+                             Collection<SMRGarbageEntry> garbageEntries) {
+        List<LogData> garbageDataList =
+                garbageEntries.stream().map(garbageEntry -> {
+
+            // epoch in token is not used, therefore it is set to a dummy value -1.
+            Token token = new Token(-1, garbageEntry.getGlobalAddress());
+            LogData garbageData = new LogData(DataType.GARBAGE, garbageEntry);
+            garbageData.useToken(token);
+
+            return garbageData;
+        }).collect(Collectors.toList());
+
+        List<Layout.LayoutSegment> segments = runtimeLayout.getLayout().getSegments();
+
+        // TODO(xin): explain
+        // get the servers from the last segment
+        List<String> servers = segments.get(segments.size() - 1).getStripes().get(stripeIndex).getLogServers();
+        int numUnits = servers.size();
+
+        CompletableFuture[] futures = new CompletableFuture[numUnits];
+
+        for (int i = 0; i < numUnits; ++i) {
+            log.trace("writing garbage [{}]: {}/{}", servers, i + 1, numUnits);
+            String server = servers.get(i);
+            futures[i] = CompletableFuture.runAsync(() -> writeGarbageToLogUnit(runtimeLayout, server,
+                    garbageDataList));
+        }
+
+        CFUtils.getUninterruptibly(CompletableFuture.allOf(futures));
+
+        log.trace("writeGarbage complete[{}]", servers);
+    }
+
+    private void writeGarbageToLogUnit(RuntimeLayout runtimeLayout, String logUnitServer,
+                                       List<LogData> garbageEntries) {
+        LogUnitClient client = runtimeLayout.getLogUnitClient(logUnitServer);
+        garbageEntries.forEach(garbageEntry -> garbageEntry.setId(runtime.getParameters().getClientId()));
+
+        final int numRetries = 3;
+
+        for (int x = 0; x < numRetries; x++) {
+            try {
+                CFUtils.getUninterruptibly(client.writeGarbageEntries(garbageEntries),
+                        NetworkException.class, TimeoutException.class, WrongEpochException.class);
+                return;
+            } catch (NetworkException | TimeoutException e) {
+                log.warn("writeGarbageToLogUnit: accessing LogUnit {} encounters a network error. " +
+                                "Invalidate layout for this client and retry, attempt: {}/{}",
+                        logUnitServer, x + 1, numRetries, e);
+                Duration retryRate = runtime.getParameters().getConnectionRetryRate();
+                Sleep.sleepUninterruptibly(retryRate);
+            } catch (WrongEpochException wee) {
+                long serverEpoch = wee.getCorrectEpoch();
+                long runtimeEpoch = runtime.getLayoutView().getLayout().getEpoch();
+                log.warn("writeGarbageToLogUnit: wrongEpochException, runtime is in epoch {}, " +
+                                "while server is in epoch {}. Invalidate layout for this client and retry, attempt: " +
+                                "{}/{}", runtimeEpoch, serverEpoch, x + 1, numRetries);
+                runtime.invalidateLayout();
+            }
+        }
+
+        String errorMsg = String.format("Writing garbage to %s fails after %d attempts",
+                logUnitServer, numRetries);
+
+        log.warn(errorMsg);
+        throw new RetryExhaustedException(errorMsg);
     }
 
     /**
@@ -268,6 +354,34 @@ public class AddressSpaceView extends AbstractView {
     }
 
     /**
+     * Commit the addresses in the range by first inspecting the addresses
+     * and if data does not exist in log, hole fill the address. This is
+     * used by management agent for log consolidation.
+     *
+     * @param start start of address range, inclusive
+     * @param end   end of address range, inclusive
+     */
+    public void commit(long start, long end) {
+        if (start >= end) {
+            return;
+        }
+
+        ContiguousSet<Long> range = ContiguousSet.create(
+                Range.closed(start, end), DiscreteDomain.longs());
+
+        // Commit the addresses and update all log unit servers with the
+        // new committed tail, which is the end of range. Exceptions are
+        // handled at the upper layer.
+        layoutHelper(e -> {
+            e.getLayout().getReplicationMode(start)
+                    .getReplicationProtocol(runtime)
+                    .commitAll(e, range);
+            Utils.updateCommittedTail(e.getLayout(), runtime, end);
+            return null;
+        }, true);
+    }
+
+    /**
      * Perform a single read with the default read options
      */
     public @NonNull ILogData read(long address) {
@@ -334,7 +448,7 @@ public class AddressSpaceView extends AbstractView {
                 List<Long> batch = getBatch(nextRead, addresses);
                 log.trace("read: request address {}, read batch {}", nextRead, batch);
                 Map<Long, ILogData> mapAddresses = read(batch, options);
-                data = mapAddresses.get(nextRead);
+                data = mapAddresses.getOrDefault(nextRead, LogData.getCompacted(nextRead));
             }
 
             return data;
@@ -417,55 +531,15 @@ public class AddressSpaceView extends AbstractView {
                 Sets.newHashSet(addresses), cachedData.keySet());
 
         final Map<Long, ILogData> uncachedData = fetchAll(addressesToFetch, options);
-        final List<Long> trimmedAddresses = filterTrimmedAddresses(uncachedData);
-        trimmedAddresses.forEach(uncachedData::remove);
+        final List<Long> compactedAddresses = filterCompactedAddresses(uncachedData);
+        compactedAddresses.forEach(uncachedData::remove);
 
         final Map<Long, ILogData> result = uncachedData.entrySet().stream()
                 .collect(Collectors.toMap(Entry::getKey, entry ->
                         cacheLoadAndGet(readCache, entry.getKey(), entry.getValue(), options)));
         result.putAll(cachedData);
 
-        if (!trimmedAddresses.isEmpty()) {
-            if (!options.isIgnoreTrim()) {
-                throw new TrimmedException(trimmedAddresses);
-            }
-
-            log.warn("read: ignoring trimmed addresses {}", trimmedAddresses);
-        }
-
-
         return result;
-    }
-
-    /**
-     * Get the first address in the address space.
-     */
-    public Token getTrimMark() {
-        return layoutHelper(
-                e -> {
-                    long trimMark = e.getLayout().segments.stream()
-                            .flatMap(seg -> seg.getStripes().stream())
-                            .flatMap(stripe -> stripe.getLogServers().stream())
-                            .map(e::getLogUnitClient)
-                            .map(LogUnitClient::getTrimMark)
-                            .map(future -> {
-                                // This doesn't look nice, but its required to trigger
-                                // the retry mechanism in AbstractView. Also, getUninterruptibly
-                                // can't be used here because it throws a UnrecoverableCorfuInterruptedError
-                                try {
-                                    return future.join();
-                                } catch (CompletionException ex) {
-                                    Throwable cause = ex.getCause();
-                                    if (cause instanceof RuntimeException) {
-                                        throw (RuntimeException) cause;
-                                    } else {
-                                        throw new RuntimeException(cause);
-                                    }
-                                }
-                            })
-                            .max(Comparator.naturalOrder()).get();
-                    return new Token(e.getLayout().getEpoch(), trimMark);
-                });
     }
 
     /**
@@ -474,25 +548,6 @@ public class AddressSpaceView extends AbstractView {
     public Long getLogTail() {
         return layoutHelper(
                 e -> Utils.getLogTail(e.getLayout(), runtime));
-    }
-
-    /**
-     * Get all tails, includes: log tail and stream tails.
-     */
-    public TailsResponse getAllTails() {
-        return layoutHelper(
-                e -> Utils.getAllTails(e.getLayout(), runtime));
-    }
-
-    /**
-     * Get log address space, which includes:
-     *     1. Addresses belonging to each stream.
-     *     2. Log Tail.
-     * @return
-     */
-    public StreamsAddressResponse getLogAddressSpace() {
-        return layoutHelper(
-                e -> Utils.getLogAddressSpace(e.getLayout(), runtime));
     }
 
     /**
@@ -506,65 +561,51 @@ public class AddressSpaceView extends AbstractView {
      * @param address log address
      */
     public void prefixTrim(final Token address) {
-        log.info("PrefixTrim[{}]", address);
-        final int numRetries = 3;
-
-        for (int x = 0; x < numRetries; x++) {
-            try {
-                // By changing the order of the trimming operations, i.e., signal the
-                // sequencer about a trim before actually trimming the log unit, we prevent a race condition,
-                // in which a client could attempt to read a trimmed address over and over again, as signal
-                // has not reached the sequencer. The problem with this is that we have a retry limit of 2, so
-                // if the race is present on just one cycle we will abort due to trimmed exception.
-                // In this case we avoid this case, and even if the log unit trim fails,
-                // this data is checkpointed so there is no actual correctness implication.
-                // TODO(Maithem): trimCache should be epoch aware?
-                runtime.getSequencerView().trimCache(address.getSequence());
-
-                layoutHelper(e -> {
-                            e.getLayout().getPrefixSegments(address.getSequence()).stream()
-                                    .flatMap(seg -> seg.getStripes().stream())
-                                    .flatMap(stripe -> stripe.getLogServers().stream())
-                                    .map(e::getLogUnitClient)
-                                    .map(client -> client.prefixTrim(address))
-                                    .forEach(cf -> {CFUtils.getUninterruptibly(cf,
-                                            NetworkException.class, TimeoutException.class,
-                                            WrongEpochException.class);
-                                    });
-                            return null;
-                }, true);
-                break;
-            } catch (NetworkException | TimeoutException e) {
-                log.warn("prefixTrim: encountered a network error on try {}", x, e);
-                Duration retryRate = runtime.getParameters().getConnectionRetryRate();
-                Sleep.sleepUninterruptibly(retryRate);
-            } catch (WrongEpochException wee) {
-                long serverEpoch = wee.getCorrectEpoch();
-                long runtimeEpoch = runtime.getLayoutView().getLayout().getEpoch();
-                log.warn("prefixTrim[{}]: wrongEpochException, runtime is in epoch {}, while server is in epoch {}. "
-                                + "Invalidate layout for this client and retry, attempt: {}/{}",
-                        address, runtimeEpoch, serverEpoch, x + 1, numRetries);
-                runtime.invalidateLayout();
-            }
-        }
+        // No-op, only for temporary backward compatibility.
     }
 
-    /** Force compaction on an address space, which will force
+    /**
+     * Get the first address in the address space.
+     */
+    public Token getTrimMark() {
+        // No-op, only for temporary backward compatibility.
+        return new Token(-1, -1);
+    }
+
+    /**
+     * Force compaction on an address space, which will force
      * all log units to free space, and process any outstanding
      * trim requests.
-     *
      */
     public void gc() {
-        log.debug("GarbageCollect");
-        layoutHelper(e -> {
-            e.getLayout().segments.stream()
-                    .flatMap(seg -> seg.getStripes().stream())
-                    .flatMap(stripe -> stripe.getLogServers().stream())
-                    .map(e::getLogUnitClient)
-                    .map(LogUnitClient::compact)
-                    .forEach(CFUtils::getUninterruptibly);
-            return null;
-        });
+        // No-op, only for temporary backward compatibility.
+    }
+
+    /**
+     * Get all tails, includes: log tail and stream tails.
+     */
+    public TailsResponse getAllTails() {
+        return layoutHelper(
+                e -> Utils.getAllTails(e.getLayout(), runtime));
+    }
+
+    /**
+     * Get the maximum committed log tail from all log units.
+     */
+    public long getCommittedTail() {
+        return layoutHelper(
+                e -> Utils.getCommittedTail(e.getLayout(), runtime), true);
+    }
+
+    /**
+     * Get log address space, which includes:
+     *     1. Addresses belonging to each stream.
+     *     2. Log Tail.
+     * @return
+     */
+    public StreamsAddressResponse getLogAddressSpace() {
+        return layoutHelper(
+                e -> Utils.getLogAddressSpace(e.getLayout(), runtime));
     }
 
     /**
@@ -628,41 +669,33 @@ public class AddressSpaceView extends AbstractView {
     }
 
     /**
-     * Given the input data, deduce which addresses have been trimmed.
+     * Given the input data, deduce which addresses have been compacted.
      *
      * @param allData data on which the operation will be performed
-     *
-     * @return the list of addresses that have been trimmed.
+     * @return the list of addresses that have been compacted
      */
-    private List<Long> filterTrimmedAddresses(Map<Long, ILogData> allData) {
+    private List<Long> filterCompactedAddresses(Map<Long, ILogData> allData) {
         return allData.entrySet().stream()
-                .filter(entry -> !isLogDataValid(entry.getKey(), entry.getValue(), NO_THROW))
+                .filter(entry -> !isLogDataValid(entry.getKey(), entry.getValue()))
                 .map(Entry::getKey).collect(Collectors.toList());
     }
 
     /**
-     * Checks whether a log entry is valid or not. If a read
-     * returns null, Empty, or trimmed an exception will be
-     * thrown.
+     * Checks whether a log entry is valid and un-compacted. If a read
+     * result is null or Empty, an exception will be thrown, if a read
+     * result is a compacted entry, return false.
      *
      * @param address the address being checked
      * @param logData the ILogData at the address being checked
-     * @return true if valid data, false if address is trimmed.
+     * @return true if valid data, false if address is compacted.
      */
-    private boolean isLogDataValid(long address, ILogData logData, boolean throwException) {
+    private boolean isLogDataValid(long address, ILogData logData) {
         if (logData == null || logData.getType() == DataType.EMPTY) {
             throw new RuntimeException("Unexpected return of empty data at address "
                     + address + " on read");
         }
 
-        if (logData.isTrimmed()) {
-            if (throwException) {
-                throw new TrimmedException(String.format("Trimmed address %s", address));
-            }
-            return false;
-        }
-
-        return true;
+        return !logData.isCompacted();
     }
 
     /**
@@ -678,17 +711,104 @@ public class AddressSpaceView extends AbstractView {
                 .read(e, address)
         );
 
-        checkLogDataThrowException(address, result);
+        isLogDataValid(address, result);
 
         return result;
     }
 
-    private void checkLogDataThrowException(long address, ILogData result) {
-        isLogDataValid(address, result, true);
+    /**
+     * Fetch garbage decisions from LogUnit servers.
+     *
+     * @param addresses an iterator of a collection of addresses to read.
+     * @return garbage decisions.
+     */
+    @Nonnull
+    public Map<Long, LogData> FetchGarbageEntries(Iterable<Long> addresses) {
+        Iterable<List<Long>> batches = Iterables.partition(addresses,
+                runtime.getParameters().getBulkReadSize());
+
+        // The garbage should come from the same log unit servers.
+        // Prevent batch results come from different log unit due to layout change. 
+        return layoutHelper(e -> {
+            Map<Long, LogData> garbageEntries = new TreeMap<>();
+            for (List<Long> batch : batches) {
+                Map<Long, LogData> batchResult = FetchGarbageEntryBatch(batch, e);
+                garbageEntries.putAll(batchResult);
+            }
+            return garbageEntries;
+        });
+    }
+
+    @Nonnull
+    private Map<Long, LogData> FetchGarbageEntryBatch(Iterable<Long> addresses, RuntimeLayout runtimeLayout) {
+        Map<String, List<Long>> serverToAddressMap = new HashMap<>();
+        for (Long address : addresses) {
+            List<String> logServers = runtimeLayout.getLayout().getStripe(address).getLogServers();
+            String logServer = logServers.get(logServers.size() - 1);
+            List<Long> addressList = serverToAddressMap.computeIfAbsent(logServer, s -> new ArrayList<>());
+            addressList.add(address);
+        }
+
+        // Send read requests to log unit servers in parallel
+        List<CompletableFuture<ReadResponse>> futures = serverToAddressMap.entrySet().stream()
+                .map(entry -> runtimeLayout.getLogUnitClient(entry.getKey()).readGarbageEntries(entry.getValue()))
+                .collect(Collectors.toList());
+
+        // Merge the read responses from different log unit servers
+        return futures.stream()
+                .map(future -> CFUtils.getUninterruptibly(future).getAddresses())
+                .reduce(new HashMap<>(), (map1, map2) -> {
+                    map1.putAll(map2);
+                    return map1;
+                });
     }
 
     @VisibleForTesting
     Cache<Long, ILogData> getReadCache() {
         return readCache;
     }
+
+    /**
+     * Update compaction mark in the AddressSpaceView.
+     * Compaction mark could only monotonically grow.
+     * @param runtime         corfu runtime
+     * @param compactionMark  compaction mark
+     */
+    public void updateCompactionMark(CorfuRuntime runtime, long compactionMark) {
+        // Compaction mark could only monotonically grow.
+        runtime.getAddressSpaceView().getCompactionMark().getAndUpdate((address) -> {
+            if (address < compactionMark) {
+                log.trace("Compaction mark is updated to {}", compactionMark);
+
+                // garbage collection is trigger only when compaction mark grows, therefore
+                // triggerGC would NOT be invoked too frequently.
+                triggerGC();
+
+                return compactionMark;
+            } else {
+                return address;
+            }
+        });
+    }
+
+    private void triggerGC() {
+        if (Address.nonAddress(lastTrimMark))  {
+            lastTrimMark = compactionMark.get();
+            lastTrimTime = System.currentTimeMillis();
+        } else {
+            long ts = System.currentTimeMillis();
+
+            // The interval between two consecutive garbage collections should be greater
+            // than a cool down time
+            if (ts - lastTrimTime > GC_INTERVAL.toMillis()) {
+
+                // garbage collection is deferred for a cycle to prevent evict information
+                // which would be used shortly.
+                runtime.getGarbageCollector().gc(lastTrimMark);
+                lastTrimTime = ts;
+                lastTrimMark = compactionMark.get();
+            }
+        }
+    }
+
 }

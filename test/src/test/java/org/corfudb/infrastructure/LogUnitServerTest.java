@@ -4,6 +4,7 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import org.corfudb.format.Types;
 import org.corfudb.infrastructure.log.StreamLogFiles;
+import org.corfudb.infrastructure.log.StreamLogParams;
 import org.corfudb.protocols.wireprotocol.*;
 import org.corfudb.runtime.CorfuRuntime;
 import org.corfudb.runtime.exceptions.LogUnitException;
@@ -295,7 +296,6 @@ public class LogUnitServerTest extends AbstractServerTest {
         String serviceDir = PARAMETERS.TEST_TEMP_DIR;
         final long maxAddress = 20000L;
         final long minAddress = 10000L;
-        final long trimMark = 15000L;
         UUID streamID = UUID.randomUUID();
 
         LogUnitServer logUnitServer = new LogUnitServer(new ServerContextBuilder()
@@ -328,7 +328,6 @@ public class LogUnitServerTest extends AbstractServerTest {
 
         // Retrieve address space from current log unit server (write path)
         StreamAddressSpace addressSpace = logUnitServer.getStreamAddressSpace(streamID);
-        assertThat(addressSpace.getTrimMark()).isEqualTo(Address.NON_EXIST);
         assertThat(addressSpace.getAddressMap().getLongCardinality()).isEqualTo(minAddress + 1);
 
         // Instantiate new log unit server (restarts) so the log is read and address maps are rebuilt.
@@ -339,18 +338,11 @@ public class LogUnitServerTest extends AbstractServerTest {
 
         // Retrieve address space from new initialized log unit server (bootstrap path)
         addressSpace = newServer.getStreamAddressSpace(streamID);
-        assertThat(addressSpace.getTrimMark()).isEqualTo(Address.NON_EXIST);
         assertThat(addressSpace.getAddressMap().getLongCardinality()).isEqualTo(minAddress + 1);
-
-        // Trim the log, and verify that trim mark is updated on log unit
-        newServer.prefixTrim(trimMark);
-        sendRequest(CorfuMsgType.PREFIX_TRIM.payloadMsg(new TrimRequest(new Token(0l, trimMark)))).join();
-
 
         // Retrieve address space from current log unit server (after a prefix trim)
         addressSpace = newServer.getStreamAddressSpace(streamID);
-        assertThat(addressSpace.getTrimMark()).isEqualTo(trimMark);
-        assertThat(addressSpace.getAddressMap().getLongCardinality()).isEqualTo(maxAddress - trimMark);
+        assertThat(addressSpace.getAddressMap().getReverseLongIterator().next()).isEqualTo(maxAddress);
     }
 
     @Test
@@ -428,7 +420,7 @@ public class LogUnitServerTest extends AbstractServerTest {
     public void testInvalidLogVersion() throws Exception {
         // Create a log file with an invalid version
         String tempDir = PARAMETERS.TEST_TEMP_DIR;
-        createLogFile(tempDir, StreamLogFiles.VERSION + 1, false);
+        createLogFile(tempDir, StreamLogParams.VERSION + 1, false);
 
         // Start a new logging version
         ServerContextBuilder builder = new ServerContextBuilder();
@@ -444,7 +436,7 @@ public class LogUnitServerTest extends AbstractServerTest {
 
         // Generate a log file without computing the checksum for log entries
         String tempDir = PARAMETERS.TEST_TEMP_DIR;
-        createLogFile(tempDir, StreamLogFiles.VERSION + 1, noVerify);
+        createLogFile(tempDir, StreamLogParams.VERSION + 1, noVerify);
 
         // Start a new logging version
         ServerContextBuilder builder = new ServerContextBuilder();

@@ -10,15 +10,6 @@ import java.util.List;
  * that has been trimmed.
  */
 public class TrimmedException extends LogUnitException {
-
-    /*
-     * This flag determines whether the operation that caused this exception
-     * can retry or not.
-     */
-    @Getter
-    @Setter
-    private boolean retriable = true;
-
     /*
      * List of trimmed addresses.
      */
@@ -36,6 +27,5 @@ public class TrimmedException extends LogUnitException {
 
     public TrimmedException(String message) {
         super(message);
-        retriable = true;
     }
 }

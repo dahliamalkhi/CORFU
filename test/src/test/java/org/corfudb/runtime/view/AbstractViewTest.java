@@ -38,6 +38,7 @@ import org.corfudb.runtime.clients.TestRule;
 import org.corfudb.runtime.exceptions.OutrankedException;
 
 import org.corfudb.util.NodeLocator;
+import org.eclipse.jetty.server.Server;
 import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.Before;
@@ -229,6 +230,10 @@ public abstract class AbstractViewTest extends AbstractCorfuTest {
         bootstrapAllServers(layout);
     }
 
+    public void addSingleServer(int port, ServerContextBuilder serverContextBuilder) {
+        new TestServer(serverContextBuilder.setPort(port).build().getServerConfig()).addToTest(port, this);
+    }
+
 
     /** Get a instance of a test server, which provides access to the underlying components and server router.
      *
@@ -350,6 +355,13 @@ public abstract class AbstractViewTest extends AbstractCorfuTest {
         return getRuntime().connect();
     }
 
+    public CorfuRuntime getDefaultRuntime(ServerContextBuilder serverContextBuilder) {
+        if (!testServerMap.containsKey(getEndpoint(SERVERS.PORT_0))) {
+            addSingleServer(SERVERS.PORT_0, serverContextBuilder);
+        }
+        return getRuntime().connect();
+    }
+
     static EventLoopGroup NETTY_EVENT_LOOP;
 
     @BeforeClass
@@ -465,6 +477,24 @@ public abstract class AbstractViewTest extends AbstractCorfuTest {
      */
     public String getEndpoint(int port) {
         return "test:" + port;
+    }
+
+    /**
+     * Start to trigger compaction. This function is only used for testing purpose.
+     * @param rt Corfu runtime.
+     * @param logUnitServer LogUnit server.
+     */
+    protected void startCompaction(CorfuRuntime rt, LogUnitServer logUnitServer) {
+        // stop periodical tasks to prevent race condition
+        rt.getGarbageInformer().stop();
+
+        // wait until all garbage decisions are sent to logUnit servers.
+        rt.getGarbageInformer().waitUntilAllTasksFinish();
+
+        // run compaction on LogUnit servers
+        logUnitServer.runCompaction();
+        rt.getAddressSpaceView().resetCaches();
+        rt.getAddressSpaceView().invalidateServerCaches();
     }
 
     // Private

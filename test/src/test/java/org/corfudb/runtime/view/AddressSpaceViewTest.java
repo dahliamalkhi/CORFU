@@ -7,8 +7,11 @@ import com.google.common.collect.Range;
 import org.corfudb.common.compression.Codec;
 import org.corfudb.infrastructure.LogUnitServerAssertions;
 import org.corfudb.infrastructure.TestLayoutBuilder;
+import org.corfudb.protocols.logprotocol.SMRGarbageEntry;
+import org.corfudb.protocols.logprotocol.SMRGarbageRecord;
 import org.corfudb.protocols.wireprotocol.*;
 import org.corfudb.runtime.CorfuRuntime;
+import org.corfudb.runtime.GarbageInformer;
 import org.corfudb.util.MetricsUtils;
 import org.junit.Test;
 
@@ -164,17 +167,6 @@ public class AddressSpaceViewTest extends AbstractViewTest {
         // Since the default behavior of write is to cache entries, address 2 should
         // be cached
         assertThat(clientCache.getIfPresent(2L)).isNotNull();
-    }
-
-    @Test
-    public void testGetTrimMark() {
-        setupNodes();
-        CorfuRuntime rt = getRuntime().connect();
-        assertThat(rt.getAddressSpaceView().getTrimMark().getSequence()).isEqualTo(0);
-        final Token trimAddress = new Token(rt.getLayoutView().getLayout().getEpoch(), 10);
-
-        rt.getAddressSpaceView().prefixTrim(trimAddress);
-        assertThat(rt.getAddressSpaceView().getTrimMark().getSequence()).isEqualTo(trimAddress.getSequence() + 1);
     }
 
     @Test

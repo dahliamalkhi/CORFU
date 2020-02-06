@@ -103,8 +103,13 @@ public class ThreadSafeStreamView implements IStreamView {
     }
 
     @Override
-    public long getTotalUpdates() {
+    public synchronized long getTotalUpdates() {
         return stream.getTotalUpdates();
+    }
+
+    @Override
+    public synchronized long getCompactionMark() {
+        return stream.getCompactionMark();
     }
 
     @VisibleForTesting
