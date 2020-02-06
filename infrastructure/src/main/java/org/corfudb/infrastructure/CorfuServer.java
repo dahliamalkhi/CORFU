@@ -5,8 +5,12 @@ import static org.corfudb.util.NetworkUtils.getAddressFromInterfaceName;
 import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.core.joran.spi.JoranException;
+import java.io.File;
+import java.io.IOException;
+import java.util.Map;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.io.FileUtils;
+import org.corfudb.infrastructure.datastore.DataStore.DataStoreConfig;
 import org.corfudb.common.metrics.MetricsServer;
 import org.corfudb.common.metrics.servers.PrometheusMetricsServer;
 import org.corfudb.runtime.exceptions.unrecoverable.UnrecoverableCorfuError;
@@ -227,7 +231,7 @@ public class CorfuServer {
         createServiceDirectory(opts);
 
         // Check the specified number of datastore files to retain
-        if (Integer.parseInt((String) opts.get("--metadata-retention")) < 1) {
+        if (Integer.parseInt((String) opts.get(DataStoreConfig.METADATA_RETENTION_PARAM)) < 1) {
             throw new IllegalArgumentException("Max number of metadata files to retain must be greater than 0.");
         }
 
@@ -281,11 +285,11 @@ public class CorfuServer {
      * @param opts Server options map.
      */
     private static void createServiceDirectory(Map<String, Object> opts) {
-        if ((Boolean) opts.get("--memory")) {
+        if ((Boolean) opts.get(DataStoreConfig.MEMORY_PARAM)) {
             return;
         }
 
-        File serviceDir = new File((String) opts.get("--log-path"));
+        File serviceDir = new File((String) opts.get(DataStoreConfig.LOG_PATH_PARAM));
 
         if (!serviceDir.isDirectory()) {
             log.error("Service directory {} does not point to a directory. Aborting.",
@@ -298,7 +302,7 @@ public class CorfuServer {
                 + "corfu";
         File corfuServiceDir = new File(corfuServiceDirPath);
         // Update the new path with the dedicated child service directory.
-        opts.put("--log-path", corfuServiceDirPath);
+        opts.put(DataStoreConfig.LOG_PATH_PARAM, corfuServiceDirPath);
         if (!corfuServiceDir.exists() && corfuServiceDir.mkdirs()) {
             log.info("Created new service directory at {}.", corfuServiceDir);
         }
@@ -311,8 +315,8 @@ public class CorfuServer {
      */
     private static void clearDataFiles(ServerContext serverContext) {
         log.warn("main: cleanup requested, DELETE server data files");
-        if (!serverContext.getServerConfig(Boolean.class, "--memory")) {
-            File serviceDir = new File(serverContext.getServerConfig(String.class, "--log-path"));
+        if (!serverContext.getServerConfig(Boolean.class, DataStoreConfig.MEMORY_PARAM)) {
+            File serviceDir = new File(serverContext.getServerConfig(String.class, DataStoreConfig.LOG_PATH_PARAM));
             try {
                 FileUtils.cleanDirectory(serviceDir);
             } catch (IOException ioe) {
@@ -385,8 +389,8 @@ public class CorfuServer {
         println("Version (" + GitRepositoryState.getRepositoryState().commitIdAbbrev + ")");
 
         final int port = Integer.parseInt((String) opts.get("<port>"));
-        final String dataLocation = (Boolean) opts.get("--memory") ? "MEMORY mode" :
-                opts.get("--log-path").toString();
+        final String dataLocation = (Boolean) opts.get(DataStoreConfig.MEMORY_PARAM) ? "MEMORY mode" :
+                opts.get(DataStoreConfig.LOG_PATH_PARAM).toString();
 
         println("Serving on port " + port);
         println("Data location: " + dataLocation);
