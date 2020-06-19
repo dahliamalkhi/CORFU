@@ -9,6 +9,7 @@ import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
 import org.corfudb.comm.ChannelImplementation;
+import org.corfudb.common.util.ClassUtils;
 import org.corfudb.infrastructure.datastore.DataStore;
 import org.corfudb.infrastructure.datastore.KvDataStore.KvRecord;
 import org.corfudb.infrastructure.paxos.PaxosDataStore;
@@ -324,7 +325,15 @@ public class ServerContext implements AutoCloseable {
      */
     @SuppressWarnings("unchecked")
     public <T> T getServerConfig(Class<T> type, String optionName) {
-        return (T) getServerConfig().get(optionName);
+        if (!serverConfig.containsKey(optionName)) {
+            return null;
+        }
+
+        return ClassUtils.cast(serverConfig.get(optionName));
+    }
+
+    public <T> T getServerConfig(Class<T> type, String optionName, T defaultValue) {
+        return Optional.ofNullable(getServerConfig(type, optionName)).orElse(defaultValue);
     }
 
 
