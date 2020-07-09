@@ -40,7 +40,7 @@ import java.util.concurrent.TimeUnit;
 public class SnapshotSender {
 
     // TODO (probably move to a configuration file)
-    public static final int SNAPSHOT_BATCH_SIZE = 5;
+    public static final int SNAPSHOT_BATCH_SIZE = 10;
     public static final int DEFAULT_TIMEOUT = 5000;
 
     private CorfuRuntime runtime;
@@ -134,7 +134,7 @@ public class SnapshotSender {
                     log.error("Exception caught while blocking on snapshot sync {}, ack for {}",
                             snapshotSyncEventId, baseSnapshotTimestamp, e);
                     if (snapshotSyncAck.isCompletedExceptionally()) {
-                        log.error("...");
+                        log.error("Snapshot Sync completed exceptionally", e);
                     }
                     snapshotSyncCancel(snapshotSyncEventId, LogReplicationError.UNKNOWN);
                 } finally {
@@ -184,7 +184,7 @@ public class SnapshotSender {
         // If Snapshot is complete, add end marker
         if (completed) {
             LogReplicationEntry endDataMessage = getSnapshotSyncEndMarker(snapshotSyncEventId);
-            log.info("SnapshotSender sent out SNAPSHOT_END message {} " + endDataMessage.getMetadata());
+            log.info("SnapshotSender sent out SNAPSHOT_END message {} ", endDataMessage.getMetadata());
             snapshotSyncAck = dataSenderBufferManager.sendWithBuffering(endDataMessage);
             numMessages++;
         }
@@ -200,6 +200,7 @@ public class SnapshotSender {
      * @return snapshot sync start marker as LogReplicationEntry
      */
     private LogReplicationEntry resendMsgsAndWaitAckForSnapshotEnd(UUID snapshotSyncEventId) {
+        log.warn("****** Send log replication entry with topologyConfigId = {}", fsm.getTopologyConfigId());
         LogReplicationEntryMetadata metadata = new LogReplicationEntryMetadata(MessageType.SNAPSHOT_START, fsm.getTopologyConfigId(),
                 snapshotSyncEventId, Address.NON_ADDRESS, Address.NON_ADDRESS, baseSnapshotTimestamp, Address.NON_ADDRESS);
         LogReplicationEntry emptyEntry = new LogReplicationEntry(metadata, new byte[0]);
