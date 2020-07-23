@@ -2,6 +2,7 @@ package org.corfudb.infrastructure.logreplication;
 
 import org.corfudb.infrastructure.logreplication.replication.send.LogReplicationError;
 import org.corfudb.protocols.wireprotocol.logreplication.LogReplicationEntry;
+import org.corfudb.protocols.wireprotocol.logreplication.LogReplicationQueryMetadataResponse;
 
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -22,6 +23,7 @@ public interface DataSender {
      */
     CompletableFuture<LogReplicationEntry> send(LogReplicationEntry message);
 
+
     /**
      * Application callback on next available messages for transmission to remote cluster.
      *
@@ -29,6 +31,12 @@ public interface DataSender {
      * @return
      */
     CompletableFuture<LogReplicationEntry> send(List<LogReplicationEntry> messages);
+
+    /**
+     * Used by Snapshot Full Sync to poll the receiver's status.
+     * @return
+     */
+    CompletableFuture<LogReplicationQueryMetadataResponse> sendQueryMetadataRequest();
 
     /**
      * Application callback on error.

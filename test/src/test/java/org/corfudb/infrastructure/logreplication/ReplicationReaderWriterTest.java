@@ -24,7 +24,6 @@ import org.corfudb.runtime.view.ObjectsView;
 import org.corfudb.runtime.view.StreamOptions;
 import org.corfudb.runtime.view.stream.IStreamView;
 import org.corfudb.runtime.view.stream.OpaqueStream;
-import org.corfudb.test.SampleSchema.Uuid;
 import org.junit.Test;
 
 import java.lang.reflect.InvocationTargetException;
@@ -35,6 +34,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Stream;
+import org.corfudb.test.SampleSchema.Uuid;
 
 import static org.assertj.core.api.AssertionsForClassTypes.assertThat;
 import static org.corfudb.integration.ReplicationReaderWriterIT.NUM_TRANSACTIONS;
@@ -57,7 +57,6 @@ public class ReplicationReaderWriterTest extends AbstractViewTest {
 
     HashMap<String, CorfuTable<Long, Long>> srcTables = new HashMap<>();
     HashMap<String, CorfuTable<Long, Long>> dstTables = new HashMap<>();
-    HashMap<String, CorfuTable<Long, Long>> shadowTables = new HashMap<>();
     LogEntryReader logEntryReader;
     LogEntryWriter logEntryWriter;
 

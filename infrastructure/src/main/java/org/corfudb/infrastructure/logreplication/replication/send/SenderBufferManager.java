@@ -62,9 +62,9 @@ public abstract class SenderBufferManager {
     long maxAckForLogEntrySync = Address.NON_ADDRESS;
 
     /*
-     * the max snapShotSeqNum has ACKed. Used by snapshot sync.
+     * the max snapShotSeqNum used by snapshot sync.
      */
-    private long maxAckForSnapshotSync = Address.NON_ADDRESS;
+    private long maxAckedMsgSeqNum = Address.NON_ADDRESS;
 
     private DataSender dataSender;
 
@@ -149,8 +149,8 @@ public abstract class SenderBufferManager {
         }
 
         updateAck(ack);
-        log.trace("Received ack {} total pending log entry acks {} for timestamps {}",
-                ack, pendingCompletableFutureForAcks.size(), pendingCompletableFutureForAcks.keySet());
+        log.trace("Received ack {} total pending log entry acks {}  and pending messages {}",
+                ack, pendingCompletableFutureForAcks.keySet(), pendingMessages.getSize());
 
         return ack;
     }
@@ -159,18 +159,15 @@ public abstract class SenderBufferManager {
      * This is used by SnapshotStart, SnapshotEnd marker messages as those messages don't have a sequence number.
      */
     public CompletableFuture<LogReplicationEntry> sendWithoutBuffering(LogReplicationEntry entry) {
-        entry.getMetadata().setSnapshotSyncSeqNum(maxAckForSnapshotSync++);
+        entry.getMetadata().setSnapshotSyncSeqNum(maxAckedMsgSeqNum++);
         CompletableFuture<LogReplicationEntry> cf = dataSender.send(entry);
         int retry = 0;
         boolean result = false;
 
-        while (retry++ < maxRetry && result == false) {
-            try {
-                cf.get(timeoutTimer, TimeUnit.MILLISECONDS);
-                result = true;
-            } catch (Exception e) {
+        try {
+            cf.get(timeoutTimer, TimeUnit.MILLISECONDS);
+        } catch (Exception e) {
                 log.warn("Caught an exception", e);
-            }
         }
 
         if (result == false) {
@@ -185,8 +182,9 @@ public abstract class SenderBufferManager {
      * @param message
      */
     public CompletableFuture<LogReplicationEntry> sendWithBuffering(LogReplicationEntry message) {
-        message.getMetadata().setSnapshotSyncSeqNum(maxAckForSnapshotSync++);
+        message.getMetadata().setSnapshotSyncSeqNum(maxAckedMsgSeqNum++);
         pendingMessages.append(message);
+        log.trace("Send messsage {}", message.getMetadata());
         CompletableFuture<LogReplicationEntry> cf = dataSender.send(message);
         addCFToAcked(message, cf);
         return cf;
@@ -211,14 +209,22 @@ public abstract class SenderBufferManager {
         //Enforce a resend or not
         LogReplicationEntry ack = null;
         boolean force = false;
+        log.debug("processAcks {} and pendingMessage size {}", pendingCompletableFutureForAcks.keySet(), pendingMessages.getSize());
+
+        if (pendingMessages.isEmpty()) {
+            return null;
+        }
+
         try {
             ack = processAcks();
         } catch (TimeoutException e) {
             log.warn("Caught a timeout exception ", e);
             force = true;
-        } catch (Exception e) {
-            log.warn("Caught an Exception and will notify discovery service ", e);
-            //TODO: notify discoveryService
+        } catch (ExecutionException | InterruptedException e ) {
+            // TODO Anny/Xiaoqin:
+            // This could be caused by network disconnection or leadership loss at the standby site,
+            // the Replication FSM should stop, and generate an event at LogReplicationRuntime.
+            log.warn("Caught an exception.", e);
         }
 
         for (int i = 0; i < pendingMessages.getSize(); i++) {
@@ -231,9 +237,11 @@ public abstract class SenderBufferManager {
                 }
 
                 entry.retry();
+                log.debug("Resend message {}", entry.getData().getMetadata());
                 CompletableFuture<LogReplicationEntry> cf = dataSender.send(entry.getData());
                 addCFToAcked(entry.getData(), cf);
-                log.info("resend message " + entry.getData().getMetadata().getTimestamp());
+            } else {
+                log.info("Skip resending message {} with timer {} ", entry.getData().getMetadata(), msgTimer);
             }
         }
 
@@ -246,7 +254,8 @@ public abstract class SenderBufferManager {
      * @param lastAckedTimestamp
      */
     public void reset(long lastAckedTimestamp) {
-        maxAckForSnapshotSync = Address.NON_ADDRESS;
+        log.info("Reset SenderBufferManager");
+        maxAckedMsgSeqNum = Address.NON_ADDRESS;
         maxAckForLogEntrySync = lastAckedTimestamp;
         pendingMessages.clear();
         pendingCompletableFutureForAcks.clear();

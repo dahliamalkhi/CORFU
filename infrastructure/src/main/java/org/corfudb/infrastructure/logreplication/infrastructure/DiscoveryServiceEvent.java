@@ -6,14 +6,15 @@ import lombok.Setter;
 import org.corfudb.infrastructure.logreplication.proto.LogReplicationClusterInfo.TopologyConfigurationMsg;
 
 public class DiscoveryServiceEvent {
-    DiscoveryServiceEventType type;
+    @Getter
+    private DiscoveryServiceEventType type;
 
     @Getter
-    TopologyConfigurationMsg topologyConfig = null;
+    private TopologyConfigurationMsg topologyConfig = null;
 
     @Getter
     @Setter
-    ClusterDescriptor remoteSiteInfo;
+    private ClusterDescriptor remoteClusterInfo;
 
     public DiscoveryServiceEvent(DiscoveryServiceEventType type) {
        this.type = type;
@@ -26,6 +27,7 @@ public class DiscoveryServiceEvent {
 
     public enum DiscoveryServiceEventType {
         DISCOVERED_TOPOLOGY,
+        DISCOVER_INIT_TOPOLOGY,
         ACQUIRE_LOCK,
         RELEASE_LOCK,
         UPGRADE

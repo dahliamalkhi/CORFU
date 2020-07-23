@@ -9,7 +9,7 @@ import org.corfudb.infrastructure.logreplication.runtime.CorfuLogReplicationRunt
 import org.corfudb.infrastructure.logreplication.runtime.LogReplicationClientRouter;
 import org.corfudb.protocols.wireprotocol.CorfuMsg;
 import org.corfudb.protocols.wireprotocol.CorfuMsgType;
-import org.corfudb.protocols.wireprotocol.logreplication.LogReplicationNegotiationResponse;
+import org.corfudb.protocols.wireprotocol.logreplication.LogReplicationQueryMetadataResponse;
 
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -101,9 +101,9 @@ public class NegotiatingState implements LogReplicationRuntimeState {
         try {
             if(fsm.getRemoteLeader().isPresent()) {
                 String remoteLeader = fsm.getRemoteLeader().get();
-                CompletableFuture<LogReplicationNegotiationResponse> cf = router.sendMessageAndGetCompletable(
-                        new CorfuMsg(CorfuMsgType.LOG_REPLICATION_NEGOTIATION_REQUEST).setEpoch(0), remoteLeader);
-                LogReplicationNegotiationResponse response = cf.get(CorfuLogReplicationRuntime.DEFAULT_TIMEOUT, TimeUnit.MILLISECONDS);
+                CompletableFuture<LogReplicationQueryMetadataResponse> cf = router.sendMessageAndGetCompletable(
+                        new CorfuMsg(CorfuMsgType.LOG_REPLICATION_QUERY_METADATA_REQUEST).setEpoch(0), remoteLeader);
+                LogReplicationQueryMetadataResponse response = cf.get(CorfuLogReplicationRuntime.DEFAULT_TIMEOUT, TimeUnit.MILLISECONDS);
 
                 // Process Negotiation Response, and determine if we start replication and which type type to start
                 // (snapshot or log entry sync). This will be carried along the negotiation_complete event.
@@ -141,10 +141,15 @@ public class NegotiatingState implements LogReplicationRuntimeState {
      * @return
      * @throws LogReplicationNegotiationException
      */
-    private void processNegotiationResponse(LogReplicationNegotiationResponse negotiationResponse)
+    private void processNegotiationResponse(LogReplicationQueryMetadataResponse negotiationResponse)
             throws LogReplicationNegotiationException {
 
         log.debug("Process negotiation response {} from {}", negotiationResponse, fsm.getRemoteClusterId());
+
+        /*
+         * Get the current log head.
+         */
+        long logHead = metadataManager.getLogHead();
 
         /*
          * If the version are different, report an error.
@@ -176,12 +181,7 @@ public class NegotiatingState implements LogReplicationRuntimeState {
         }
 
         /*
-         * Get the current log head.
-         */
-        long logHead = metadataManager.getLogHead();
-
-        /*
-         * It is a fresh start, start snapshot full sync.
+         * It is a fresh start, start snapshot full sync if log with timestamp 0 is not available.
          * Following is an example that metadata value indicates a fresh start, no replicated data at standby site:
          * "topologyConfigId": "10"
          * "version": "release-1.0"
@@ -192,11 +192,19 @@ public class NegotiatingState implements LogReplicationRuntimeState {
          * "lastLogEntryProcessed": "-1"
          */
         if (negotiationResponse.getSnapshotStart() == -1) {
-            log.info("No snapshot available in remote. Initiate SNAPSHOT sync to {}.", fsm.getRemoteClusterId());
-            negotiationResponse.getLastLogProcessed();
-            fsm.input(new LogReplicationRuntimeEvent(LogReplicationRuntimeEvent.LogReplicationRuntimeEventType.NEGOTIATION_COMPLETE,
-                    new LogReplicationEvent(LogReplicationEvent.LogReplicationEventType.SNAPSHOT_SYNC_REQUEST)));
-            return;
+            if (logHead == 0) {
+                log.info("No snapshot available in remote. Initiate SNAPSHOT sync to {}.", fsm.getRemoteClusterId());
+                negotiationResponse.getLastLogProcessed();
+                fsm.input(new LogReplicationRuntimeEvent(LogReplicationRuntimeEvent.LogReplicationRuntimeEventType.NEGOTIATION_COMPLETE,
+                        new LogReplicationEvent(LogReplicationEvent.LogReplicationEventType.SNAPSHOT_SYNC_REQUEST)));
+                return;
+            } else {
+                log.info("No snapshot available in remote. Initiate SNAPSHOT sync to {}.", fsm.getRemoteClusterId());
+                negotiationResponse.getLastLogProcessed();
+                fsm.input(new LogReplicationRuntimeEvent(LogReplicationRuntimeEvent.LogReplicationRuntimeEventType.NEGOTIATION_COMPLETE,
+                        new LogReplicationEvent(LogReplicationEvent.LogReplicationEventType.SNAPSHOT_SYNC_REQUEST)));
+                return;
+            }
         }
 
         /*

@@ -40,6 +40,4 @@ public enum MessageType {
         }
         throw new IllegalArgumentException("wrong value " + type);
     }
-
-
 }

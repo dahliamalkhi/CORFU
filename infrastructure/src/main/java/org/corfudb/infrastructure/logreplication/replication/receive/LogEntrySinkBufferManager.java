@@ -18,11 +18,10 @@ public class LogEntrySinkBufferManager extends SinkBufferManager {
      * @param ackCycleTime
      * @param ackCycleCnt
      * @param size
-     * @param lastProcessedSeq last processed log entry's timestamp
      * @param sinkManager
      */
-    public LogEntrySinkBufferManager(int ackCycleTime, int ackCycleCnt, int size, long lastProcessedSeq, LogReplicationSinkManager sinkManager) {
-        super(LOG_ENTRY_MESSAGE, ackCycleTime, ackCycleCnt, size, lastProcessedSeq, sinkManager);
+    public LogEntrySinkBufferManager(int ackCycleTime, int ackCycleCnt, int size, LogReplicationSinkManager sinkManager) {
+        super(LOG_ENTRY_MESSAGE, ackCycleTime, ackCycleCnt, size, sinkManager);
     }
 
     /**
@@ -41,8 +40,13 @@ public class LogEntrySinkBufferManager extends SinkBufferManager {
      * @return log entry message's timestamp.
      */
     @Override
-    long getCurrentSeq(LogReplicationEntry entry) {
+    public long getCurrentSeq(LogReplicationEntry entry) {
         return entry.getMetadata().getTimestamp();
+    }
+
+    @Override
+    public long getLastProcessed() {
+        return logReplicationMetadataManager.getLastProcessedLogTimestamp();
     }
 
     /**
@@ -51,10 +55,14 @@ public class LogEntrySinkBufferManager extends SinkBufferManager {
      * @return ackMessage's metadata.
      */
     @Override
-    public LogReplicationEntryMetadata makeAckMessage(LogReplicationEntry entry) {
+    public LogReplicationEntryMetadata getAckMetadata(LogReplicationEntry entry) {
+        long lastProcessedSeq = getLastProcessed();
+
         LogReplicationEntryMetadata metadata = new LogReplicationEntryMetadata(entry.getMetadata());
         metadata.setMessageMetadataType(LOG_ENTRY_REPLICATED);
+        metadata.setSnapshotTimestamp(logReplicationMetadataManager.getLastSrcBaseSnapshotTimestamp());
         metadata.setTimestamp(lastProcessedSeq);
+
         log.debug("Sink Buffer lastProcessedSeq {}", lastProcessedSeq);
         return metadata;
     }

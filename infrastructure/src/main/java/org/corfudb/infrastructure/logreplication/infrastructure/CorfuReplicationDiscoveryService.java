@@ -1,5 +1,6 @@
 package org.corfudb.infrastructure.logreplication.infrastructure;
 
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 
@@ -17,7 +18,6 @@ import org.corfudb.infrastructure.logreplication.proto.LogReplicationClusterInfo
 import org.corfudb.runtime.exceptions.RetryExhaustedException;
 import org.corfudb.runtime.exceptions.unrecoverable.UnrecoverableCorfuInterruptedError;
 import org.corfudb.util.NodeLocator;
-import org.corfudb.util.Sleep;
 import org.corfudb.util.retry.ExponentialBackoffRetry;
 import org.corfudb.util.retry.IRetry;
 import org.corfudb.util.retry.IntervalRetry;
@@ -31,8 +31,12 @@ import java.time.Duration;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
+
+import static org.corfudb.infrastructure.logreplication.infrastructure.DiscoveryServiceEvent.DiscoveryServiceEventType.DISCOVER_INIT_TOPOLOGY;
 
 /**
  * This class represents the Log Replication Discovery Service.
@@ -44,7 +48,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * - Log replication configuration (streams to replicate)
  */
 @Slf4j
-public class CorfuReplicationDiscoveryService implements Runnable, CorfuReplicationDiscoveryServiceAdapter {
+public class CorfuReplicationDiscoveryService implements CorfuReplicationDiscoveryServiceAdapter {
 
     /**
      * Wait interval (in seconds) between consecutive fetch topology attempts to cap exponential back-off.
@@ -81,6 +85,12 @@ public class CorfuReplicationDiscoveryService implements Runnable, CorfuReplicat
     @Getter
     private CorfuReplicationClusterManagerAdapter clusterManagerAdapter;
 
+
+    /**
+     *  Executor that process events in order in the event queue.
+     */
+    private final ExecutorService executorService;
+
     /**
      * Defines the topology, which is discovered through the Cluster Manager
      */
@@ -112,7 +122,7 @@ public class CorfuReplicationDiscoveryService implements Runnable, CorfuReplicat
     /**
      * A queue of Discovery Service events
      */
-    private final LinkedBlockingQueue<DiscoveryServiceEvent> eventQueue = new LinkedBlockingQueue<>();
+    private final LinkedBlockingQueue<DiscoveryServiceEvent> eventQueue;
 
     /**
      * Callback to Log Replication Server upon topology discovery
@@ -120,6 +130,8 @@ public class CorfuReplicationDiscoveryService implements Runnable, CorfuReplicat
     private CompletableFuture<CorfuInterClusterReplicationServerNode> serverCallback;
 
     private CorfuInterClusterReplicationServerNode interClusterReplicationService;
+
+    private boolean shutdown;
 
     private ServerContext serverContext;
 
@@ -143,45 +155,49 @@ public class CorfuReplicationDiscoveryService implements Runnable, CorfuReplicat
 
     /**
      * Constructor Discovery Service
-     *
      * @param serverContext current server's context
      * @param clusterManagerAdapter adapter to communicate to external Cluster Manager
      * @param serverCallback callback to Log Replication Server upon discovery
-     *
      */
     public CorfuReplicationDiscoveryService(@Nonnull ServerContext serverContext,
                                             @Nonnull CorfuReplicationClusterManagerAdapter clusterManagerAdapter,
                                             @Nonnull CompletableFuture<CorfuInterClusterReplicationServerNode> serverCallback) {
+        this.executorService = Executors.newSingleThreadExecutor(new
+                ThreadFactoryBuilder().setNameFormat("discovery-service-executor").build());
         this.clusterManagerAdapter = clusterManagerAdapter;
         this.logReplicationNodeId = serverContext.getNodeId();
         this.serverContext = serverContext;
         this.localEndpoint = serverContext.getLocalEndpoint();
         this.serverCallback = serverCallback;
         this.isLeader = new AtomicBoolean();
+        this.shutdown = false;
+        this.isLeader = new AtomicBoolean();
+        this.eventQueue = new LinkedBlockingQueue<>();
     }
 
-    public void run() {
-        try {
-            startDiscovery();
+    /**
+     * start Discovery Service
+     */
+    public void start() {
 
-            while (shouldRun) {
-                try {
-                    DiscoveryServiceEvent event = eventQueue.take();
-                    processEvent(event);
-                } catch (Exception e) {
-                    log.error("Caught an exception. Stop discovery service.", e);
-                    shouldRun = false;
-                    stopLogReplication();
-                    if (e instanceof InterruptedException) {
-                        Thread.interrupted();
-                    }
-                }
-            }
-        } catch (Exception e) {
-            log.error("Unhandled exception caught during log replication service discovery. Retry,", e);
-        } finally {
-            if (runtime != null) {
-                runtime.shutdown();
+        // The DISCOVERY_INIT_TOPOLOGY should be the first event to be processed for both ACTIVE and STANDBY sites.
+        this.eventQueue.add(new DiscoveryServiceEvent(DISCOVER_INIT_TOPOLOGY));
+
+        this.executorService.submit(this::run);
+    }
+
+    /**
+     * The executor thread will keep running at background and process events in eventQueue
+     */
+    private void run() {
+
+        while (!shutdown) {
+            try {
+                DiscoveryServiceEvent event = eventQueue.take();
+                processEvent(event);
+            } catch (InterruptedException e) {
+                log.error("Caught an exception. Stop discovery service.", e);
+                shutdown();
             }
         }
     }
@@ -190,7 +206,11 @@ public class CorfuReplicationDiscoveryService implements Runnable, CorfuReplicat
      * Process discovery event
      */
     public void processEvent(DiscoveryServiceEvent event) {
-        switch (event.type) {
+        switch (event.getType()) {
+            case DISCOVER_INIT_TOPOLOGY:
+                startDiscovery();
+                break;
+
             case ACQUIRE_LOCK:
                 processLockAcquire();
                 break;
@@ -208,9 +228,10 @@ public class CorfuReplicationDiscoveryService implements Runnable, CorfuReplicat
                 break;
 
             default:
-                log.error("Invalid event type {}", event.type);
+                log.error("Invalid event type {}", event.getType());
         }
     }
+
 
     /**
      * On first access start topology discovery.
@@ -633,7 +654,7 @@ public class CorfuReplicationDiscoveryService implements Runnable, CorfuReplicat
     private void processUpgrade(DiscoveryServiceEvent event) {
         if (localClusterDescriptor.getRole() == ClusterRole.ACTIVE) {
             // TODO pankti: is this correct?
-            replicationManager.restart(event.getRemoteSiteInfo());
+            replicationManager.restart(event.getRemoteClusterInfo());
         }
     }
 
@@ -691,6 +712,9 @@ public class CorfuReplicationDiscoveryService implements Runnable, CorfuReplicat
     }
 
     public void shutdown() {
+        log.warn("Shutdown discovery service");
+        shutdown = true;
+
         if (replicationManager != null) {
             replicationManager.stop();
         }
@@ -698,6 +722,12 @@ public class CorfuReplicationDiscoveryService implements Runnable, CorfuReplicat
         if(clusterManagerAdapter != null) {
             clusterManagerAdapter.shutdown();
         }
+
+        if (runtime != null) {
+            runtime.shutdown();
+        }
+
+        executorService.shutdownNow();
     }
 
     /**

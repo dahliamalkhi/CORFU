@@ -85,6 +85,9 @@ public class LogReplicationIT extends AbstractIT implements Observer {
 
     static private TestConfig testConfig = new TestConfig();
 
+    // Sleep to retry.
+    static final int SLEEP_INTERVAL = 1000;
+
     Process sourceServer;
     Process destinationServer;
 
@@ -153,6 +156,7 @@ public class LogReplicationIT extends AbstractIT implements Observer {
     private final Semaphore blockUntilExpectedAckTs = new Semaphore(1, true);
 
     private LogReplicationMetadataManager logReplicationMetadataManager;
+    CorfuTable<String, Long> writerMetaDataTable;
 
     /**
      * Setup Test Environment
@@ -206,6 +210,13 @@ public class LogReplicationIT extends AbstractIT implements Observer {
         dstTestRuntime.connect();
 
         logReplicationMetadataManager = new LogReplicationMetadataManager(dstTestRuntime, 0, ACTIVE_CLUSTER_ID);
+        writerMetaDataTable = dstTestRuntime.getObjectsView()
+                .build()
+                .setStreamName(LogReplicationMetadataManager.getPersistedWriterMetadataTableName(ACTIVE_CLUSTER_ID))
+                .setTypeToken(new TypeToken<CorfuTable<String, Long>>() {
+                })
+                .setSerializer(Serializers.JSON)
+                .open();
     }
 
     private void cleanEnv() {
@@ -389,8 +400,11 @@ public class LogReplicationIT extends AbstractIT implements Observer {
         System.out.println("\n****** Wait until log entry sync completes and ACKs are received");
         blockUntilExpectedAckTs.acquire();
 
+
+        log.info("Final metadata {}", logReplicationMetadataManager);
+
         // Verify Data at Destination
-        System.out.println("\n****** Verify Destination Data for log entry (incremental updates)");
+        log.info("\n****** Verify Destination Data for log entry (incremental updates)");
         verifyData(dstCorfuTables, srcDataForVerification);
 
         verifyPersistedSnapshotMetadata();
@@ -1145,6 +1159,11 @@ public class LogReplicationIT extends AbstractIT implements Observer {
         } else {
             System.out.print("\n****** blockUnitilExpectedAckType " + expectedAckMsgType);
             blockUntilExpectedAckType.acquire();
+            while (logReplicationMetadataManager.getLastProcessedLogTimestamp() !=
+                    logReplicationMetadataManager.getLastSnapStartTimestamp()) {
+                sleep(SLEEP_INTERVAL);
+                log.trace("metadata {}", logReplicationMetadataManager);
+            }
         }
 
         return logReplicationSourceManager;
@@ -1305,7 +1324,6 @@ public class LogReplicationIT extends AbstractIT implements Observer {
         // If expected a ackTs, release semaphore / unblock the wait
         if (observableAckMsg.getDataMessage() != null) {
             LogReplicationEntry logReplicationEntry = observableAckMsg.getDataMessage();
-            //System.out.print("\nackMsg " + logReplicationEntry.getMetadata());
             switch (testConfig.waitOn) {
                 case ON_ACK:
                     verifyExpectedValue(expectedAckMessages, ackMessages.getMsgCnt());

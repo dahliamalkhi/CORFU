@@ -2,6 +2,7 @@ package org.corfudb.integration;
 
 import com.google.common.annotations.VisibleForTesting;
 import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
 import org.corfudb.common.util.ObservableValue;
 import org.corfudb.infrastructure.logreplication.DataSender;
 import org.corfudb.infrastructure.logreplication.LogReplicationConfig;
@@ -11,15 +12,15 @@ import org.corfudb.infrastructure.logreplication.replication.LogReplicationSourc
 import org.corfudb.infrastructure.logreplication.replication.send.LogReplicationError;
 import org.corfudb.infrastructure.logreplication.replication.fsm.ObservableAckMsg;
 import org.corfudb.protocols.wireprotocol.logreplication.LogReplicationEntry;
+import org.corfudb.protocols.wireprotocol.logreplication.LogReplicationQueryMetadataResponse;
 import org.corfudb.protocols.wireprotocol.logreplication.MessageType;
 import org.corfudb.runtime.CorfuRuntime;
 import org.corfudb.integration.DefaultDataControl.DefaultDataControlConfig;
 
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 
+@Slf4j
 public class SourceForwardingDataSender implements DataSender {
     // Runtime to remote/destination Corfu Server
     private CorfuRuntime runtime;
@@ -111,6 +112,14 @@ public class SourceForwardingDataSender implements DataSender {
         }
 
         return lastAckMessage;
+    }
+
+    @Override
+    public CompletableFuture<LogReplicationQueryMetadataResponse> sendQueryMetadataRequest() {
+        LogReplicationQueryMetadataResponse response = destinationLogReplicationManager.processQueryMetadataRequest();
+        CompletableFuture<LogReplicationQueryMetadataResponse> cf = new CompletableFuture<>();
+        cf.complete(response);
+        return cf;
     }
 
     @Override

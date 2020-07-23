@@ -29,6 +29,11 @@ public abstract class SinkBufferManager {
     HashMap<Long, LogReplicationEntry> buffer;
 
     /*
+     * Used to query the real ack information.
+     */
+    LogReplicationMetadataManager logReplicationMetadataManager;
+
+    /*
      * While processing a message in the buffer, it will call
      * sinkManager to handle it.
      */
@@ -64,29 +69,21 @@ public abstract class SinkBufferManager {
      */
     long ackTime = 0;
 
-    /*
-     * The lastProcessedSeq message's ack value.
-     * For snapshot, it is the entry's seqNumber.
-     * For log entry, it is the entry's timestamp.
-     */
-    long lastProcessedSeq;
-
     /**
      *
      * @param type
      * @param ackCycleTime
      * @param ackCycleCnt
      * @param size
-     * @param lastProcessedSeq
      * @param sinkManager
      */
-    public SinkBufferManager(MessageType type, int ackCycleTime, int ackCycleCnt, int size, long lastProcessedSeq, LogReplicationSinkManager sinkManager) {
+    public SinkBufferManager(MessageType type, int ackCycleTime, int ackCycleCnt, int size, LogReplicationSinkManager sinkManager) {
         this.type = type;
         this.ackCycleTime = ackCycleTime;
         this.ackCycleCnt = ackCycleCnt;
         this.maxSize = size;
+        this.logReplicationMetadataManager = sinkManager.getLogReplicationMetadataManager();
         this.sinkManager = sinkManager;
-        this.lastProcessedSeq = lastProcessedSeq;
         buffer = new HashMap<>();
     }
 
@@ -94,6 +91,7 @@ public abstract class SinkBufferManager {
      * Go through the buffer to find messages that are in order with the last processed message.
      */
     void processBuffer() {
+        long lastProcessedSeq = getLastProcessed();
         while (true) {
             LogReplicationEntry dataMessage = buffer.get(lastProcessedSeq);
             if (dataMessage == null)
@@ -112,7 +110,7 @@ public abstract class SinkBufferManager {
      *
      * @return
      */
-    boolean shouldAck() {
+    public boolean shouldAck(LogReplicationEntry entry) {
         long currentTime = java.lang.System.currentTimeMillis();
         ackCnt++;
 
@@ -140,21 +138,25 @@ public abstract class SinkBufferManager {
 
         long preTs = getPreSeq(dataMessage);
         long currentTs = getCurrentSeq(dataMessage);
+        long lastProcessedSeq = getLastProcessed();
 
         if (preTs == lastProcessedSeq) {
+            log.trace("Process the message {}, expecting TS {}", dataMessage.getMetadata(), preTs);
             sinkManager.processMessage(dataMessage);
             ackCnt++;
-            lastProcessedSeq = getCurrentSeq(dataMessage);
             processBuffer();
         } else if (currentTs > lastProcessedSeq && buffer.size() < maxSize) {
+            // If it is an out of order message with higher timestamp,
+            // put it into the buffer if there is space.
+            log.trace("Buffer message {}, expecting TS {}", dataMessage.getMetadata(), preTs);
             buffer.put(preTs, dataMessage);
         }
 
         /*
          * Send Ack with lastProcessedSeq
          */
-        if (shouldAck()) {
-            LogReplicationEntryMetadata metadata = makeAckMessage(dataMessage);
+        if (shouldAck(dataMessage)) {
+            LogReplicationEntryMetadata metadata = getAckMetadata(dataMessage);
             return new LogReplicationEntry(metadata, new byte[0]);
         }
 
@@ -175,12 +177,21 @@ public abstract class SinkBufferManager {
      */
     abstract long getCurrentSeq(LogReplicationEntry entry);
 
+
+    /*
+     * The lastProcessedSeq message's ack value.
+     * For snapshot, it is the entry's seqNumber.
+     * For log entry, it is the entry's timestamp.
+     * The information is got from the metadata corfu table.
+     */
+    abstract long getLastProcessed();
+
     /**
      * Make an Ack with the lastProcessedSeq
      * @param entry
      * @return
      */
-    public abstract LogReplicationEntryMetadata makeAckMessage(LogReplicationEntry entry);
+    public abstract LogReplicationEntryMetadata getAckMetadata(LogReplicationEntry entry);
 
     /*
      * Verify if the message is the correct type.
@@ -188,4 +199,13 @@ public abstract class SinkBufferManager {
      * @return
      */
     public abstract boolean verifyMessageType(LogReplicationEntry entry);
+
+    /**
+     * Reset the buffer.
+     */
+    public void reset() {
+        buffer.clear();
+        ackCnt = 0;
+        ackTime = 0;
+    }
 }

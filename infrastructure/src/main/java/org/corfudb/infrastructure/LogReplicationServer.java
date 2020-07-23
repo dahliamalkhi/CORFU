@@ -11,7 +11,7 @@ import org.corfudb.protocols.wireprotocol.CorfuMsgType;
 import org.corfudb.protocols.wireprotocol.CorfuPayloadMsg;
 import org.corfudb.protocols.wireprotocol.logreplication.LogReplicationEntry;
 import org.corfudb.protocols.wireprotocol.logreplication.LogReplicationLeadershipLoss;
-import org.corfudb.protocols.wireprotocol.logreplication.LogReplicationNegotiationResponse;
+import org.corfudb.protocols.wireprotocol.logreplication.LogReplicationQueryMetadataResponse;
 import org.corfudb.protocols.wireprotocol.logreplication.LogReplicationQueryLeaderShipResponse;
 import org.corfudb.protocols.wireprotocol.logreplication.MessageType;
 
@@ -35,6 +35,7 @@ public class LogReplicationServer extends AbstractServer {
 
     private final ServerContext serverContext;
 
+    // Used for receiving and applying messages.
     private final ExecutorService executor;
 
     @Getter
@@ -56,7 +57,6 @@ public class LogReplicationServer extends AbstractServer {
         this.serverContext = context;
         this.metadataManager = metadataManager;
         this.sinkManager = new LogReplicationSinkManager(corfuEndpoint, logReplicationConfig, metadataManager, serverContext, topologyConfigId);
-
         this.executor = Executors.newFixedThreadPool(1,
                 new ServerThreadFactory("LogReplicationServer-", new ServerThreadFactory.ExceptionHandler()));
     }
@@ -98,8 +98,17 @@ public class LogReplicationServer extends AbstractServer {
         }
     }
 
-    @ServerHandler(type = CorfuMsgType.LOG_REPLICATION_NEGOTIATION_REQUEST)
-    private void handleLogReplicationNegotiationRequest(CorfuMsg msg, ChannelHandlerContext ctx, IServerRouter r) {
+    /**
+     * Server handler to process log replication status queries.
+     * It is used at the negotiation phase to decide to start a snapshot full sync or log entry sync.
+     * It is also used during full snapshot sync while polling the receiver's status when the receiver is
+     * applying the data to the real streams.
+     * @param msg
+     * @param ctx
+     * @param r
+     */
+    @ServerHandler(type = CorfuMsgType.LOG_REPLICATION_QUERY_METADATA_REQUEST)
+    private void handleLogReplicationQueryMetadataRequest(CorfuMsg msg, ChannelHandlerContext ctx, IServerRouter r) {
         log.info("Log Replication Negotiation Request received by Server.");
 
         if (isLeader(msg, r)) {
@@ -107,7 +116,7 @@ public class LogReplicationServer extends AbstractServer {
 
             // TODO (Xiaoqin Ma): That's 6 independent DB calls per one LOG_REPLICATION_NEGOTIATION_REQUEST.
             //  Can we do just one? Also, It does not look like we handle failures if one of them fails, for example.
-            LogReplicationNegotiationResponse response = new LogReplicationNegotiationResponse(
+            LogReplicationQueryMetadataResponse response = new LogReplicationQueryMetadataResponse(
                     metadata.getTopologyConfigId(),
                     metadata.getVersion(),
                     metadata.getLastSnapStartTimestamp(),
@@ -115,7 +124,7 @@ public class LogReplicationServer extends AbstractServer {
                     metadata.getLastSrcBaseSnapshotTimestamp(),
                     metadata.getLastProcessedLogTimestamp());
             log.info("Send Negotiation response");
-            r.sendResponse(msg, CorfuMsgType.LOG_REPLICATION_NEGOTIATION_RESPONSE.payloadMsg(response));
+            r.sendResponse(msg, CorfuMsgType.LOG_REPLICATION_QUERY_METADATA_RESPONSE.payloadMsg(response));
         } else {
             log.warn("Dropping negotiation request as this node is not the leader.");
         }

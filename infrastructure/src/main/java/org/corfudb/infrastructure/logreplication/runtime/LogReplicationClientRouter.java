@@ -226,7 +226,7 @@ public class LogReplicationClientRouter implements IClientRouter {
             return cfTimeout;
         }
 
-        log.error("Invalid message type {}. Currently only log replication messages are processed.");
+        log.error("Invalid message type {}. Currently only log replication messages are processed.", message.getMsgType());
         CompletableFuture<T> f = new CompletableFuture<>();
         f.completeExceptionally(new Throwable("Invalid message type"));
         return f;
@@ -392,7 +392,7 @@ public class LogReplicationClientRouter implements IClientRouter {
      */
     private boolean isValidMessage(CorfuMsg message) {
         return message.getMsgType().equals(CorfuMsgType.LOG_REPLICATION_ENTRY) ||
-                message.getMsgType().equals(CorfuMsgType.LOG_REPLICATION_NEGOTIATION_REQUEST) ||
+                message.getMsgType().equals(CorfuMsgType.LOG_REPLICATION_QUERY_METADATA_REQUEST) ||
                 message.getMsgType().equals(CorfuMsgType.LOG_REPLICATION_QUERY_LEADERSHIP);
     }
 

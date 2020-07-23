@@ -19,14 +19,12 @@ public class SnapshotSinkBufferManager extends SinkBufferManager {
      * @param ackCycleTime
      * @param ackCycleCnt
      * @param size
-     * @param lastProcessedSeq for a fresh snapshot transfer, the input should be Address.NO_ADDRESS.
-     *                         If it restart the snapshot, it should be the value written in the metadata store.
      * @param sinkManager
      */
     public SnapshotSinkBufferManager(int ackCycleTime, int ackCycleCnt, int size,
-                                     long lastProcessedSeq, LogReplicationSinkManager sinkManager) {
+                                     LogReplicationSinkManager sinkManager) {
 
-        super(SNAPSHOT_MESSAGE, ackCycleTime, ackCycleCnt, size, lastProcessedSeq, sinkManager);
+        super(SNAPSHOT_MESSAGE, ackCycleTime, ackCycleCnt, size, sinkManager);
     }
 
     /**
@@ -48,8 +46,14 @@ public class SnapshotSinkBufferManager extends SinkBufferManager {
     long getCurrentSeq(LogReplicationEntry entry) {
         if (entry.getMetadata().getMessageMetadataType() == SNAPSHOT_END) {
             snapshotEndSeq = entry.getMetadata().getSnapshotSyncSeqNum();
+            log.info("Setup snapshotEndSeq {}", snapshotEndSeq);
         }
         return entry.getMetadata().getSnapshotSyncSeqNum();
+    }
+
+    @Override
+    long getLastProcessed() {
+        return logReplicationMetadataManager.getLastSnapSeqNum();
     }
 
     /**
@@ -58,20 +62,28 @@ public class SnapshotSinkBufferManager extends SinkBufferManager {
      * @return
      */
     @Override
-    public LogReplicationEntryMetadata makeAckMessage(LogReplicationEntry entry) {
+    public LogReplicationEntryMetadata getAckMetadata(LogReplicationEntry entry) {
         LogReplicationEntryMetadata metadata = new LogReplicationEntryMetadata(entry.getMetadata());
+
+        // Set Snapshot Timestamp.
+        entry.getMetadata().setSnapshotTimestamp(logReplicationMetadataManager.getLastSnapStartTimestamp());
+
+        // Set ackValue.
+        long lastProcessedSeq = getLastProcessed();
+
+        metadata.setSnapshotSyncSeqNum(lastProcessedSeq);
 
         /*
          * If SNAPSHOT_END message has been processed, send back SNAPSHOT_END to notify
          * sender the completion of the snapshot replication.
          */
-        if (lastProcessedSeq == snapshotEndSeq) {
+        if (lastProcessedSeq == (snapshotEndSeq -1)) {
             metadata.setMessageMetadataType(MessageType.SNAPSHOT_END);
+            metadata.setSnapshotSyncSeqNum(snapshotEndSeq);
         } else {
             metadata.setMessageMetadataType(MessageType.SNAPSHOT_REPLICATED);
         }
 
-        metadata.setSnapshotSyncSeqNum(lastProcessedSeq);
         log.debug("SnapshotSinkBufferManager send ACK {} for {}", lastProcessedSeq, metadata);
         return metadata;
     }
@@ -94,11 +106,23 @@ public class SnapshotSinkBufferManager extends SinkBufferManager {
         }
     }
 
-    boolean shouldAck() {
-        if (lastProcessedSeq == snapshotEndSeq) {
+    public boolean shouldAck(LogReplicationEntry entry) {
+        // If it has different baseSnapshot, ignore it.
+        if (entry.getMetadata().getSnapshotTimestamp() != logReplicationMetadataManager.getLastSnapStartTimestamp()) {
+            log.warn("Get a message {} that has different snapshotTime with expecting {}", entry.getMetadata(),
+                    logReplicationMetadataManager);
+            return false;
+        }
+
+
+        // Always send an ACK for snapshot tranfer end marker.
+        long lastProcessedSeq = logReplicationMetadataManager.getLastSnapSeqNum();
+        log.debug("lastProccessedSeq {}  snapshotEndSeq {}", lastProcessedSeq, snapshotEndSeq);
+        if (lastProcessedSeq == (snapshotEndSeq - 1)) {
+            log.info("Snapshot End has been processed lastProccessedSeq {}  snapshotEndSeq {}", lastProcessedSeq, snapshotEndSeq);
             return true;
         }
 
-        return super.shouldAck();
+        return super.shouldAck(entry);
     }
 }

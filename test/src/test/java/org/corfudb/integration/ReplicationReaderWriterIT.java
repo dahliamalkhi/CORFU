@@ -14,6 +14,7 @@ import org.corfudb.protocols.logprotocol.SMREntry;
 import org.corfudb.protocols.wireprotocol.ILogData;
 import org.corfudb.protocols.wireprotocol.Token;
 import org.corfudb.protocols.wireprotocol.logreplication.LogReplicationEntry;
+import org.corfudb.protocols.wireprotocol.logreplication.MessageType;
 import org.corfudb.runtime.CorfuRuntime;
 import org.corfudb.runtime.MultiCheckpointWriter;
 import org.corfudb.runtime.collections.CorfuTable;
@@ -337,21 +338,18 @@ public class ReplicationReaderWriterIT extends AbstractIT {
             SnapshotReadMessage snapshotReadMessage = reader.read(UUID.randomUUID());
             for (org.corfudb.protocols.wireprotocol.logreplication.LogReplicationEntry data : snapshotReadMessage.getMessages()) {
                 msgQ.add(data);
-                //System.out.println("generate msg " + cnt);
             }
 
             if (snapshotReadMessage.isEndRead()) {
                 break;
             }
         }
-    }
+  }
 
     public static void writeSnapLogMsgs(List<org.corfudb.protocols.wireprotocol.logreplication.LogReplicationEntry> msgQ, Set<String> streams, CorfuRuntime rt) {
         LogReplicationConfig config = new LogReplicationConfig(streams);
         LogReplicationMetadataManager logReplicationMetadataManager = new LogReplicationMetadataManager(rt, 0, PRIMARY_SITE_ID);
         StreamsSnapshotWriter writer = new StreamsSnapshotWriter(rt, config, logReplicationMetadataManager);
-
-
 
         if (msgQ.isEmpty()) {
             System.out.println("msgQ is empty");
@@ -366,8 +364,10 @@ public class ReplicationReaderWriterIT extends AbstractIT {
             writer.apply(msg);
         }
 
-        Long seq = writer.getLogReplicationMetadataManager().getLastSnapSeqNum() + 1;
-        writer.applyShadowStreams(seq);
+        LogReplicationEntry msg = msgQ.get(msgQ.size() - 1);
+        msg.getMetadata().setSnapshotSyncSeqNum(msg.getMetadata().getSnapshotSyncSeqNum() + 1);
+        msg.getMetadata().setMessageMetadataType(MessageType.SNAPSHOT_END);
+        writer.setSnapshotTransferDoneAndStartApply(msg);
     }
 
     void accessTxStream(Iterator iterator, int num) {
@@ -646,6 +646,7 @@ public class ReplicationReaderWriterIT extends AbstractIT {
         verifyData("after writing to dst", dstTables, dstHashMap);
 
         printTails("after writing to server1", srcDataRuntime, dstDataRuntime);
+
 
         //read snapshot from srcServer and put msgs into Queue
         readSnapLogMsgs(msgQ, srcHashMap.keySet(), readerRuntime);

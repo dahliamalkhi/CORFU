@@ -1,9 +1,10 @@
-package org.corfudb.infrastructure.logreplication.replication.fsm;
+package org.corfudb.infrastructure.logreplication;
 
 import lombok.Getter;
-import org.corfudb.infrastructure.logreplication.DataSender;
+import lombok.extern.slf4j.Slf4j;
 import org.corfudb.infrastructure.logreplication.replication.send.LogReplicationError;
 import org.corfudb.protocols.wireprotocol.logreplication.LogReplicationEntry;
+import org.corfudb.protocols.wireprotocol.logreplication.LogReplicationQueryMetadataResponse;
 import org.corfudb.protocols.wireprotocol.logreplication.MessageType;
 
 import java.util.LinkedList;
@@ -15,6 +16,7 @@ import java.util.concurrent.CompletableFuture;
 /**
  * Test Implementation of Snapshot Data Sender
  */
+@Slf4j
 public class TestDataSender implements DataSender {
 
     @Getter
@@ -30,6 +32,7 @@ public class TestDataSender implements DataSender {
                     message.getMetadata().getMessageMetadataType().equals(MessageType.LOG_ENTRY_MESSAGE)) {
                 // Ignore, do not account Start and End Markers as messages
                 entryQueue.add(message);
+                log.trace("add message to the entryQueue {}", entryQueue.size());
             }
         }
 
@@ -59,7 +62,13 @@ public class TestDataSender implements DataSender {
 
         return lastSentMessage;
     }
-    
+
+    @Override
+    public CompletableFuture<LogReplicationQueryMetadataResponse> sendQueryMetadataRequest() {
+        log.warn("Not implemented");
+        return new CompletableFuture<>();
+    }
+
     public void reset() {
         entryQueue.clear();
     }

@@ -4,6 +4,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.corfudb.infrastructure.logreplication.DataSender;
 import org.corfudb.infrastructure.logreplication.runtime.LogReplicationClient;
 import org.corfudb.protocols.wireprotocol.logreplication.LogReplicationEntry;
+import org.corfudb.protocols.wireprotocol.logreplication.LogReplicationQueryMetadataResponse;
 import org.corfudb.protocols.wireprotocol.logreplication.MessageType;
 
 import java.util.List;
@@ -17,6 +18,7 @@ public class CorfuDataSender implements DataSender {
     public CorfuDataSender(LogReplicationClient client) {
         this.client = client;
     }
+
 
     @Override
     public CompletableFuture<LogReplicationEntry> send(LogReplicationEntry message) {
@@ -39,6 +41,17 @@ public class CorfuDataSender implements DataSender {
         }
 
         return lastSentMessage;
+    }
+
+    /**
+     * Used by Snapshot Full Sync when it has finished transferring data and is waiting for the receiver to finish applying.
+     * The sender queries the receiver's status and will do the proper transition.
+     * @return
+     */
+    @Override
+    public CompletableFuture<LogReplicationQueryMetadataResponse> sendQueryMetadataRequest() {
+        log.trace("query remote metadata");
+        return client.sendQueryMetadataRequest();
     }
 
     @Override
