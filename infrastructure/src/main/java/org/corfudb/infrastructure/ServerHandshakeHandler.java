@@ -78,8 +78,6 @@ public class ServerHandshakeHandler extends ChannelDuplexHandler {
 
         try {
             handshake = (CorfuPayloadMsg<HandshakeMsg>) m;
-            log.debug("channelRead: Handshake Message received. Removing {} from pipeline.",
-                    READ_TIMEOUT_HANDLER);
             // Remove the handler from the pipeline. Also remove the reference of the context from
             // the handler so that it does not disconnect the channel.
             ctx.pipeline().remove(READ_TIMEOUT_HANDLER).handlerRemoved(ctx);
@@ -117,22 +115,15 @@ public class ServerHandshakeHandler extends ChannelDuplexHandler {
 
         // Store clientID as a channel attribute.
         ctx.channel().attr(clientIdAttrKey).set(clientId);
-        log.info("channelRead: Handshake validated by Server.");
-        log.debug("channelRead: Sending handshake response: Node Id: {} Corfu Version: {}",
-                this.nodeId, this.corfuVersion);
-
         CorfuMsg handshakeResponse = CorfuMsgType.HANDSHAKE_RESPONSE
                 .payloadMsg(new HandshakeResponse(this.nodeId, this.corfuVersion));
         ctx.writeAndFlush(handshakeResponse);
 
         // Flush messages in queue
-        log.debug("channelRead: There are [{}] messages in queue to be flushed.", this.messages.size());
         while (!messages.isEmpty()) {
             ctx.writeAndFlush(messages.poll());
         }
 
-        // Remove this handler from the pipeline; handshake is completed.
-        log.info("channelRead: Removing handshake handler from pipeline.");
         ctx.pipeline().remove(this);
         this.fireHandshakeSucceeded();
     }
@@ -159,7 +150,6 @@ public class ServerHandshakeHandler extends ChannelDuplexHandler {
      */
     @Override
     public void channelInactive(ChannelHandlerContext ctx) throws Exception {
-        log.debug("channelInactive: Channel closed.");
         if (!this.state.completed()) {
             this.fireHandshakeFailed(ctx);
         }
@@ -188,8 +178,7 @@ public class ServerHandshakeHandler extends ChannelDuplexHandler {
                 log.error("exceptionCaught: Handshake timeout checker: timed out. Close Connection.");
                 this.state.set(true, false);
             } else {
-                log.debug("exceptionCaught: Handshake timeout " +
-                        "checker: discarded (handshake OK)");
+                log.debug("exceptionCaught: Handshake timeout checker: discarded (handshake OK)");
             }
         } else if (cause instanceof SSLHandshakeException) {
             // If an SslException is thrown by the inbound SslHandler it will be caught by this
