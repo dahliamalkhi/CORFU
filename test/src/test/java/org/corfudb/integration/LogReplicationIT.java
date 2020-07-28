@@ -8,6 +8,7 @@ import org.corfudb.infrastructure.LogReplicationRuntimeParameters;
 import org.corfudb.infrastructure.logreplication.LogReplicationConfig;
 import org.corfudb.infrastructure.logreplication.infrastructure.ClusterDescriptor;
 import org.corfudb.infrastructure.logreplication.proto.LogReplicationClusterInfo;
+import org.corfudb.infrastructure.logreplication.proto.LogReplicationMetadata;
 import org.corfudb.infrastructure.logreplication.replication.receive.LogReplicationMetadataManager;
 import org.corfudb.infrastructure.logreplication.replication.LogReplicationSourceManager;
 import org.corfudb.infrastructure.logreplication.replication.fsm.LogReplicationEvent;
@@ -347,9 +348,7 @@ public class LogReplicationIT extends AbstractIT implements Observer {
             System.out.println("Table[" + name + "]: " + table.keySet().size() + " keys; Expected "
                     + mapKeys.size() + " keys");
 
-            assertThat(mapKeys.keySet().containsAll(table.keySet())).isTrue();
-            assertThat(table.keySet().containsAll(mapKeys.keySet())).isTrue();
-            assertThat(table.keySet().size() == mapKeys.keySet().size()).isTrue();
+            assertThat(table.keySet().size()).isEqualTo(mapKeys.keySet().size());
 
             for (Long key : mapKeys.keySet()) {
                 assertThat(table.get(key)).isEqualTo(mapKeys.get(key));
@@ -857,7 +856,7 @@ public class LogReplicationIT extends AbstractIT implements Observer {
         // Verify Destination
         verifyData(dstCorfuTables, srcDataForVerification);
         expectedAckTimestamp = srcDataRuntime.getAddressSpaceView().getLogTail();
-        assertThat(expectedAckTimestamp).isEqualTo(logReplicationMetadataManager.getLastProcessedLogTimestamp());
+        assertThat(expectedAckTimestamp).isEqualTo(logReplicationMetadataManager.queryPersistedMetadata().getLastLogEntryProcessedTimestamp());
         verifyPersistedSnapshotMetadata();
         verifyPersistedLogEntryMetadata();
 
@@ -947,7 +946,7 @@ public class LogReplicationIT extends AbstractIT implements Observer {
 
         // Block until snapshot sync is completed (ack is received)
         System.out.println("\n****** Wait until snapshot sync is completed (ack received)");
-        //blockUntilExpectedValueReached.acquire();
+        // blockUntilExpectedValueReached.acquire();
         blockUntilExpectedAckType.acquire();
 
         // Verify its in log entry sync state and that data was completely transferred to destination
@@ -1366,16 +1365,18 @@ public class LogReplicationIT extends AbstractIT implements Observer {
     }
 
     private void verifyPersistedSnapshotMetadata() {
-        long lastSnapStart = logReplicationMetadataManager.getLastSnapStartTimestamp();
-        long lastSnapDone = logReplicationMetadataManager.getLastAppliedBaseSnapshotTimestamp();
+        LogReplicationMetadata.LogReplicationMetadataVal metadataVal = logReplicationMetadataManager.queryPersistedMetadata();
+        long lastSnapStart = metadataVal.getSnapshotStartTimestamp();
+        long lastSnapDone = metadataVal.getSnapshotAppliedTimestamp();
 
         System.out.println("\nlastSnapStart " + lastSnapStart + " lastSnapDone " + lastSnapDone);
         assertThat(lastSnapStart == lastSnapDone).isTrue();
     }
 
     private void verifyPersistedLogEntryMetadata() {
-        long lastLogProcessed = logReplicationMetadataManager.getLastProcessedLogTimestamp();
+        LogReplicationMetadata.LogReplicationMetadataVal metadataVal = logReplicationMetadataManager.queryPersistedMetadata();
 
+        long lastLogProcessed = metadataVal.getLastLogEntryProcessedTimestamp();
         System.out.println("\nlastLogProcessed " + lastLogProcessed + " expectedTimestamp " + expectedAckTimestamp);
         assertThat(expectedAckTimestamp == lastLogProcessed).isTrue();
     }

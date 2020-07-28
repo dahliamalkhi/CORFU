@@ -6,12 +6,12 @@ import org.corfudb.infrastructure.logreplication.proto.LogReplicationMetadata.Lo
 import org.corfudb.infrastructure.logreplication.proto.LogReplicationMetadata.LogReplicationMetadataVal;
 import org.corfudb.protocols.wireprotocol.logreplication.LogReplicationEntry;
 import org.corfudb.runtime.CorfuRuntime;
-import org.corfudb.runtime.CorfuStoreMetadata;
+import org.corfudb.runtime.CorfuStoreMetadata.Timestamp;
 import org.corfudb.runtime.collections.CorfuRecord;
 import org.corfudb.runtime.collections.CorfuStore;
 import org.corfudb.runtime.collections.Table;
 import org.corfudb.runtime.collections.TableOptions;
-import org.corfudb.runtime.collections.TxBuilder;
+import org.corfudb.runtime.exceptions.TransactionAbortedException;
 import org.corfudb.runtime.view.Address;
 
 import java.util.UUID;
@@ -19,20 +19,35 @@ import java.util.UUID;
 import static org.corfudb.runtime.view.TableRegistry.CORFU_SYSTEM_NAMESPACE;
 
 /**
- * The table persisted at the replication writer side.
- * It records the log reader cluster's snapshot timestamp  and last log entry's timestamp, it has received and processed.
+ * The class manages the metadata table persisted at the replication cluster.
+ * It records the cluster's topologyConfigId, version, and log replication status.
+ * For now, this table has only one entry with key as "CORFU-REPLICATION-CURRENT-STATUS",
+ * value is the LogReplicationMetadataVal defined in the log_replication_metadata.proto.
+ *
+ * The log replication status (used by standby side) contains following information:
+ * 1. full snapshot transfer status: base snapshot timestamp, transfer phase timestamp, apply phase timestamp, and the snapshot
+ *    message's sequence number has been received and has been applied.
+ * 2. delta sync status: the last log entry timestamp has been applied.
+ *
  */
 @Slf4j
 public class LogReplicationMetadataManager {
 
+    @Getter
     private static final String NAMESPACE = CORFU_SYSTEM_NAMESPACE;
     private static final String TABLE_PREFIX_NAME = "CORFU-REPLICATION-WRITER-";
+    private static final String CURRENT_METADATA_KEY = "CORFU-REPLICATION-CURRENT-STATUS";
 
+    @Getter
     private CorfuStore corfuStore;
 
+    @Getter
+    private LogReplicationMetadataKey currentMetadataKey = LogReplicationMetadataKey.newBuilder().setKey(CURRENT_METADATA_KEY).build();
+
+    @Getter
     private String metadataTableName;
 
-    private Table<LogReplicationMetadataKey, LogReplicationMetadataVal, LogReplicationMetadataVal> metadataTable;
+    private Table<LogReplicationMetadataKey, LogReplicationMetadataVal, LogReplicationMetadataKey> metadataTable;
 
     private CorfuRuntime runtime;
 
@@ -54,262 +69,287 @@ public class LogReplicationMetadataManager {
         setupTopologyConfigId(topologyConfigId);
     }
 
-    public CorfuStoreMetadata.Timestamp getTimestamp() {
+    /**
+     * Get the latest logical timestamp (global tail) in Corfu's distributed log.
+     * @return
+     */
+    public Timestamp getTimestamp() {
         return corfuStore.getTimestamp();
     }
 
-    public TxBuilder getTxBuilder() {
-        return corfuStore.tx(NAMESPACE);
-    }
+    /**
+     * Given a metadataName, return its value at the persisted corfu table.
+     * This is used for metadata that has int64 defined in the proto.
+     * @param metadataName
+     * @return
+     */
+    public long query(LogReplicationMetadataName metadataName) {
+        CorfuRecord<LogReplicationMetadataVal, LogReplicationMetadataKey> record = metadataTable.get(currentMetadataKey);
 
-    private String queryString(CorfuStoreMetadata.Timestamp timestamp, LogReplicationMetadataType key) {
-        LogReplicationMetadataKey txKey = LogReplicationMetadataKey.newBuilder().setKey(key.getVal()).build();
-        CorfuRecord record;
-        if (timestamp == null) {
-            record = corfuStore.query(NAMESPACE).getRecord(metadataTableName, txKey);
-        } else {
-            record = corfuStore.query(NAMESPACE).getRecord(metadataTableName, timestamp, txKey);
+        if (record == null) {
+            log.warn(" The log replication metadata doesn't exist at corefuTable, the operation could not succeed.");
+            return Address.NON_ADDRESS;
         }
 
-        LogReplicationMetadataVal metadataVal = null;
-        String val = null;
+        switch (metadataName) {
+            case TOPOLOGY_CONFIG_ID:
+                return record.getPayload().getTopologyConfigId();
+
+            case LAST_SNAPSHOT_STARTED:
+                return record.getPayload().getSnapshotStartTimestamp();
+
+            case LAST_SNAPSHOT_TRANSFERRED:
+                return record.getPayload().getSnapshotTransferredTimestamp();
+
+            case LAST_SNAPSHOT_APPLIED:
+                return record.getPayload().getSnapshotAppliedTimestamp();
+
+            case LAST_SNAPSHOT_MSG_RECEIVED_SEQ_NUM:
+                return record.getPayload().getSnapshotMessageReceivedSeqNum();
+
+            case LAST_SNAPSHOT_MSG_APPLIED_SEQ_NUM:
+                return record.getPayload().getSnapshotMessageAppliedSeqNum();
+
+            case LAST_LOG_PROCESSED:
+                return record.getPayload().getLastLogEntryProcessedTimestamp();
+
+            case CURRENT_SNAPSHOT_CYCLE_ID:
+                return record.getPayload().getCurrentSnapshotCycleId();
+
+            case CURRENT_CYCLE_MIN_SHADOW_STREAM_TS:
+                return record.getPayload().getMinShadowStreamTimestamp();
+
+            default:
+                log.error("There is no metadata name for {}", metadataName);
+                return Address.NON_ADDRESS;
+        }
+    }
+
+
+    public LogReplicationMetadataVal queryPersistedMetadata() {
+        CorfuRecord<LogReplicationMetadataVal, LogReplicationMetadataKey> record = metadataTable.get(currentMetadataKey);
+
+        if (record == null) {
+            log.warn(" The log replication metadata doesn't exist at corefuTable, the operation could not succeed.");
+            return LogReplicationMetadataVal.newBuilder().build();
+        }
+
+        return record.getPayload();
+    }
+
+    /**
+     * Set the snapshot sync start marker, i.e., a unique identification of the current snapshot sync cycle.
+     * Identified by the snapshot sync Id and the min shadow stream update timestamp for this cycle.
+     *
+     * @param currentSnapshotSyncId
+     * @param shadowStreamTs
+     */
+    public void setSnapshotSyncStartMarker(UUID currentSnapshotSyncId, Timestamp shadowStreamTs, LogReplicationTxBuilder txBuilder) {
+
+        long currentSnapshotSyncIdLong = currentSnapshotSyncId.getMostSignificantBits() & Long.MAX_VALUE;
+        long persistedSnapshotId = query(LogReplicationMetadataName.CURRENT_SNAPSHOT_CYCLE_ID);
+
+        if (persistedSnapshotId != currentSnapshotSyncIdLong) {
+            // Update if current Snapshot Sync differs from the persisted one, otherwise ignore.
+            // It could have already been updated in the case that leader changed in between a snapshot sync cycle
+            txBuilder.appendUpdate(LogReplicationMetadataName.CURRENT_SNAPSHOT_CYCLE_ID, currentSnapshotSyncIdLong);
+            txBuilder.appendUpdate(LogReplicationMetadataName.CURRENT_CYCLE_MIN_SHADOW_STREAM_TS, shadowStreamTs.getSequence());
+            log.debug("Set Metadata {} as {}, {} as {} ", LogReplicationMetadataName.CURRENT_SNAPSHOT_CYCLE_ID, currentSnapshotSyncIdLong,
+                    LogReplicationMetadataName.CURRENT_CYCLE_MIN_SHADOW_STREAM_TS, shadowStreamTs);
+        }
+    }
+
+    /**
+     * Retrieve the snapshot sync start marker
+     **/
+    public long getMinSnapshotSyncShadowStreamTs() {
+        return query(LogReplicationMetadataName.CURRENT_CYCLE_MIN_SHADOW_STREAM_TS);
+    }
+
+    /**
+     * Update the topologyConfigId with a transaction.
+     * It will set the log replications status with init values.
+     * @param topologyConfigId
+     */
+    public void setupTopologyConfigId(long topologyConfigId) {
+        LogReplicationTxBuilder txBuilder = LogReplicationTxBuilder.getLogReplicationTxBuilder(this);
+
+        CorfuRecord<LogReplicationMetadataVal, LogReplicationMetadataKey> record = metadataTable.get(currentMetadataKey);
+        long persistedTopologyConfigId = Address.NON_ADDRESS;
+        String persistedVersion = "NO VERSION";
 
         if (record != null) {
-            metadataVal = (LogReplicationMetadataVal)record.getPayload();
+            persistedTopologyConfigId = record.getPayload().getTopologyConfigId();
+            persistedVersion = record.getPayload().getVersion();
         }
-
-        if (metadataVal != null) {
-            val = metadataVal.getVal();
-        }
-
-        return val;
-    }
-
-    public long query(CorfuStoreMetadata.Timestamp timestamp, LogReplicationMetadataType key) {
-        long val = -1;
-        String str = queryString(timestamp, key);
-        if (str != null) {
-            val = Long.parseLong(str);
-        }
-        return val;
-    }
-
-    public long getTopologyConfigId() {
-        return query(null, LogReplicationMetadataType.TOPOLOGY_CONFIG_ID);
-    }
-
-    public String getVersion() { return queryString(null, LogReplicationMetadataType.VERSION); }
-
-    public long getLastSnapStartTimestamp() {
-        return query(null, LogReplicationMetadataType.LAST_SNAPSHOT_STARTED);
-    }
-
-    public long getLastSnapTransferDoneTimestamp() {
-        return query(null, LogReplicationMetadataType.LAST_SNAPSHOT_TRANSFERRED);
-    }
-
-    public long getLastAppliedBaseSnapshotTimestamp() {
-        return query(null, LogReplicationMetadataType.LAST_SNAPSHOT_APPLIED);
-    }
-
-    public long getLastSnapSeqNum() {
-        return query(null, LogReplicationMetadataType.LAST_SNAPSHOT_SEQ_NUM);
-    }
-
-    public long getLastProcessedLogTimestamp() {
-        return query(null, LogReplicationMetadataType.LAST_LOG_PROCESSED);
-    }
-
-    public void appendUpdate(TxBuilder txBuilder, LogReplicationMetadataType key, long val) {
-        LogReplicationMetadataKey txKey = LogReplicationMetadataKey.newBuilder().setKey(key.getVal()).build();
-        LogReplicationMetadataVal txVal = LogReplicationMetadataVal.newBuilder().setVal(Long.toString(val)).build();
-        txBuilder.update(metadataTableName, txKey, txVal, null);
-    }
-
-    private void appendUpdate(TxBuilder txBuilder, LogReplicationMetadataType key, String val) {
-        LogReplicationMetadataKey txKey = LogReplicationMetadataKey.newBuilder().setKey(key.getVal()).build();
-        LogReplicationMetadataVal txVal = LogReplicationMetadataVal.newBuilder().setVal(val).build();
-        txBuilder.update(metadataTableName, txKey, txVal, null);
-    }
-
-    public void setupTopologyConfigId(long topologyConfigId) {
-        CorfuStoreMetadata.Timestamp timestamp = corfuStore.getTimestamp();
-        long persistedTopologyConfigId = query(timestamp, LogReplicationMetadataType.TOPOLOGY_CONFIG_ID);
 
         if (topologyConfigId <= persistedTopologyConfigId) {
-            log.warn("Skip setupTopologyConfigId. the current topologyConfigId " + topologyConfigId + " is not larger than the persistedTopologyConfigID " + persistedTopologyConfigId);
+            log.warn("Skip setupTopologyConfigId. the current topologyConfigId {} is smaller than the persistedTopologyConfigID {}.",
+                    topologyConfigId, persistedTopologyConfigId);
             return;
         }
 
-        TxBuilder txBuilder = corfuStore.tx(NAMESPACE);
+        LogReplicationMetadataVal metadataVal = LogReplicationTxBuilder.buildMetadataValInstance(topologyConfigId, persistedVersion);
 
-        for (LogReplicationMetadataType key : LogReplicationMetadataType.values()) {
-            long val = Address.NON_ADDRESS;
-            if (key == LogReplicationMetadataType.TOPOLOGY_CONFIG_ID) {
-                val = topologyConfigId;
-            }
-            appendUpdate(txBuilder, key, val);
-         }
-
-        txBuilder.commit(timestamp);
-        log.info("Update topologyConfigId, new metadata {}", this);
-    }
-
-    public void updateVersion(String version) {
-        CorfuStoreMetadata.Timestamp timestamp = corfuStore.getTimestamp();
-        String  persistedVersion = queryString(timestamp, LogReplicationMetadataType.VERSION);
-
-        if (persistedVersion.equals(version)) {
-            log.warn("Skip update the current version {} with new version {} as they are the same", persistedVersion, version);
-            return;
+        try {
+            txBuilder.commit(metadataVal);
+        } catch (TransactionAbortedException e) {
+            log.warn("Transaction about when updating with the new topologyConfigId {} ", topologyConfigId, e);
         }
-
-        TxBuilder txBuilder = corfuStore.tx(NAMESPACE);
-
-        for (LogReplicationMetadataType key : LogReplicationMetadataType.values()) {
-            long val = Address.NON_ADDRESS;
-
-            // For version, it will be updated with the current version
-            if (key == LogReplicationMetadataType.VERSION) {
-                appendUpdate(txBuilder, key, version);
-            } else if (key == LogReplicationMetadataType.TOPOLOGY_CONFIG_ID) {
-                // For siteConfig ID, it should not be changed. Update it to fence off other metadata updates.
-                val = query(timestamp, LogReplicationMetadataType.TOPOLOGY_CONFIG_ID);
-                appendUpdate(txBuilder, key, val);
-            } else {
-                // Reset all other keys to -1.
-                appendUpdate(txBuilder, key, val);
-            }
-        }
-
-        txBuilder.commit(timestamp);
     }
 
     /**
      * If the current topologyConfigId is not the same as the persisted topologyConfigId, ignore the operation.
-     * If the current ts is smaller than the persisted snapStart, it is an old operation,
-     * ignore it it.
-     * Otherwise, update the snapStart. The update of topologyConfigId just fence off any other metadata
-     * updates in another transactions.
+     * If the current ts is smaller than the persisted snapStart, it is an old operation, ignore the operation.
+     * Otherwise, update the snapStart.
      *
      * @param topologyConfigId the current operation's topologyConfigId
      * @param ts the snapshotStart snapshot time for the topologyConfigId.
      * @return if the operation succeeds or not.
      */
     public boolean setSrcBaseSnapshotStart(long topologyConfigId, long ts) {
-        CorfuStoreMetadata.Timestamp timestamp = corfuStore.getTimestamp();
-        long persistedTopologyConfigID = query(timestamp, LogReplicationMetadataType.TOPOLOGY_CONFIG_ID);
-        long persistSnapStart = query(timestamp, LogReplicationMetadataType.LAST_SNAPSHOT_STARTED);
+        LogReplicationTxBuilder txBuilder = LogReplicationTxBuilder.getLogReplicationTxBuilder(this);
 
-        log.debug("Set snapshotStart topologyConfigId={}, ts={}, persistedTopologyConfigID={}, persistedSnapshotStart={}",
-                topologyConfigId, ts, persistedTopologyConfigID, persistSnapStart);
+        CorfuRecord<LogReplicationMetadataVal, LogReplicationMetadataKey> record = metadataTable.get(currentMetadataKey);
 
-        // It means the cluster config has changed, ignore the update operation.
-        if (topologyConfigId != persistedTopologyConfigID || ts <= persistedTopologyConfigID) {
-            log.warn("The metadata is older than the persisted one. Set snapshotStart topologyConfigId={}, ts={}," +
-                    " persistedTopologyConfigId={}, persistedSnapshotStart={}", topologyConfigId, ts,
-                    persistedTopologyConfigID, persistSnapStart);
+        if (record == null) {
+            log.warn(" The log replication metadata doesn't exist at corefuTable, the operation could not succeed.");
             return false;
         }
 
-        TxBuilder txBuilder = corfuStore.tx(NAMESPACE);
+        long persistedTopologyConfigID = record.getPayload().getTopologyConfigId();
+        long persistedSnapStart = record.getPayload().getSnapshotStartTimestamp();
 
-        // Update the topologyConfigId to fence all other transactions that update the metadata at the same time
-        appendUpdate(txBuilder, LogReplicationMetadataType.TOPOLOGY_CONFIG_ID, topologyConfigId);
+        log.debug("Set snapshotStart topologyConfigId={}, ts={}, persistedTopologyConfigID={}, persistedSnapshotStart={}",
+                topologyConfigId, ts, persistedTopologyConfigID, persistedSnapStart);
 
-        // Setup the LAST_SNAPSHOT_STARTED
-        appendUpdate(txBuilder, LogReplicationMetadataType.LAST_SNAPSHOT_STARTED, ts);
+        // It means the cluster config has changed, ignore the update operation.
+        if (topologyConfigId != persistedTopologyConfigID || ts < persistedSnapStart) {
+            log.warn("The metadata is older than the persisted one. Set snapshotStart topologyConfigId={}, ts={}," +
+                    " persistedTopologyConfigId={}, persistedSnapshotStart={}", topologyConfigId, ts,
+                    persistedTopologyConfigID, persistedSnapStart);
+            return false;
+        }
 
-        // Reset other metadata
-        appendUpdate(txBuilder, LogReplicationMetadataType.LAST_SNAPSHOT_TRANSFERRED, Address.NON_ADDRESS);
-        appendUpdate(txBuilder, LogReplicationMetadataType.LAST_SNAPSHOT_APPLIED, Address.NON_ADDRESS);
-        appendUpdate(txBuilder, LogReplicationMetadataType.LAST_SNAPSHOT_SEQ_NUM, Address.NON_ADDRESS);
-        appendUpdate(txBuilder, LogReplicationMetadataType.LAST_LOG_PROCESSED, Address.NON_ADDRESS);
+        LogReplicationMetadataVal metadataVal = LogReplicationMetadataVal.newBuilder(record.getPayload()).
+                setSnapshotStartTimestamp(ts).
+                setSnapshotMessageReceivedSeqNum(Address.NON_ADDRESS).
+                setSnapshotMessageAppliedSeqNum(Address.NON_ADDRESS).
+                build();
 
-        txBuilder.commit(timestamp);
-
-        log.debug("Commit. Set snapshotStart topologyConfigId={}, ts={}, persistedTopologyConfigID={}, " +
-                        "persistedSnapshotStart={}",
-                topologyConfigId, ts, persistedTopologyConfigID, persistSnapStart);
-
-        return (ts == getLastSnapStartTimestamp() && topologyConfigId == getTopologyConfigId());
+        try {
+            txBuilder.commit(metadataVal);
+            return true;
+        } catch (TransactionAbortedException e) {
+            log.warn("Transaction Aborted while updating the SnapshotStartTimestamp {} with the topologyConfigID {}", ts, topologyConfigId);
+            return false;
+        }
     }
 
 
     /**
-     * This call should be done in a transaction after a transfer done and before apply the snapshot.
+     * This call should be done in a transaction after a transfer is done and before applying the snapshot.
      * @param ts
      */
     public void setLastSnapTransferDoneTimestamp(long topologyConfigId, long ts) {
-        CorfuStoreMetadata.Timestamp timestamp = corfuStore.getTimestamp();
-        long persistedTopologyConfigId = query(timestamp, LogReplicationMetadataType.TOPOLOGY_CONFIG_ID);
-        long persistSnapStart = query(timestamp, LogReplicationMetadataType.LAST_SNAPSHOT_STARTED);
+        LogReplicationTxBuilder txBuilder = LogReplicationTxBuilder.getLogReplicationTxBuilder(this);
 
-        log.debug("setLastSnapTransferDone snapshotStart topologyConfigId={}, ts={}, persistedTopologyConfigID={}," +
-                " persistedSiteConfigID={}, persistedSnapshotStart={}", topologyConfigId, ts, persistedTopologyConfigId,
-                persistSnapStart);
+        Timestamp timestamp = corfuStore.getTimestamp();
+        CorfuRecord<LogReplicationMetadataVal, LogReplicationMetadataKey> record = metadataTable.get(currentMetadataKey);
 
-        // It means the cluster config has changed, ignore the update operation.
-        if (topologyConfigId != persistedTopologyConfigId || ts <= persistedTopologyConfigId) {
-            log.warn("The metadata is older than the persisted one. Set snapshotStart topologyConfigId " + topologyConfigId + " ts " + ts +
-                    " persisteSiteConfigID " + persistedTopologyConfigId + " persistSnapStart " + persistSnapStart);
+        if (record == null) {
+            log.warn(" The log replication metadata doesn't exist at corefuTable, the operation could not succeed.");
             return;
         }
 
-        TxBuilder txBuilder = corfuStore.tx(NAMESPACE);
+        long persistedTopologyConfigId = record.getPayload().getTopologyConfigId();
+        long persistedSnapStart = record.getPayload().getSnapshotStartTimestamp();
+        long persistedSnapTransferredTime = record.getPayload().getSnapshotTransferredTimestamp();
 
-        //Update the topologyConfigId to fence all other transactions that update the metadata at the same time
-        appendUpdate(txBuilder, LogReplicationMetadataType.TOPOLOGY_CONFIG_ID, topologyConfigId);
+        /**
+         * If the cluster config has changed, ignore the update operation.
+         * If the timestamp is not consistent with the logReplicationStatus, ignore it.
+         */
+        if (topologyConfigId != persistedTopologyConfigId || ts != persistedSnapStart || ts <= persistedSnapTransferredTime) {
+            log.warn("The metadata topologyConfigId {} and new SnapshotTransferDoneTimestamp ts {} are older than the persisted ones {}", getPersistedMetadataStr());
+            return;
+        }
 
-        //Setup the LAST_SNAPSHOT_STARTED
-        appendUpdate(txBuilder, LogReplicationMetadataType.LAST_SNAPSHOT_TRANSFERRED, ts);
+        LogReplicationMetadataVal metadataVal = LogReplicationMetadataVal.newBuilder(record.getPayload()).
+                setSnapshotTransferredTimestamp(ts).build();
 
-        txBuilder.commit(timestamp);
-
-        log.debug("Commit. Set snapshotStart topologyConfigId " + topologyConfigId + " ts " + ts +
-                " persisteSiteConfigID " + persistedTopologyConfigId + " persistSnapStart " + persistSnapStart);
+        try {
+            txBuilder.commit(metadataVal);
+        } catch (TransactionAbortedException e) {
+            log.warn("Caught a transaction exception while updating the snapshotTransferredTimestamp {} ", metadataVal, e);
+        }
     }
 
     public void setSnapshotApplied(LogReplicationEntry entry) {
-        CorfuStoreMetadata.Timestamp timestamp = corfuStore.getTimestamp();
-        long persistSiteConfigID = query(timestamp, LogReplicationMetadataType.TOPOLOGY_CONFIG_ID);
-        long persistSnapStart = query(timestamp, LogReplicationMetadataType.LAST_SNAPSHOT_STARTED);
-        long persistSnapTranferDone = query(timestamp, LogReplicationMetadataType.LAST_SNAPSHOT_TRANSFERRED);
-        long siteConfigID = entry.getMetadata().getTopologyConfigId();
-        long ts = entry.getMetadata().getSnapshotTimestamp();
+        LogReplicationTxBuilder txBuilder = LogReplicationTxBuilder.getLogReplicationTxBuilder(this);
 
-        if (siteConfigID != persistSiteConfigID || ts != persistSnapStart || ts != persistSnapTranferDone) {
-            log.warn("topologyConfigId " + siteConfigID + " != " + " persist " + persistSiteConfigID +  " ts " + ts +
-                    " != " + "persistSnapTransferDone " + persistSnapTranferDone);
+        CorfuRecord<LogReplicationMetadataVal, LogReplicationMetadataKey> record = metadataTable.get(currentMetadataKey);
+
+        if (record == null) {
+            log.warn(" The log replication metadata doesn't exist at corefuTable, the operation could not succeed.");
             return;
         }
 
-        TxBuilder txBuilder = corfuStore.tx(NAMESPACE);
+        long persistedTopologyConfigId = record.getPayload().getTopologyConfigId();
+        long persistedSnapStart = record.getPayload().getSnapshotStartTimestamp();
+        long persistedSnapTranferDone = record.getPayload().getSnapshotTransferredTimestamp();
+        long topologyConfigID = entry.getMetadata().getTopologyConfigId();
+        long ts = entry.getMetadata().getSnapshotTimestamp();
 
-        //Update the topologyConfigId to fence all other transactions that update the metadata at the same time
-        appendUpdate(txBuilder, LogReplicationMetadataType.TOPOLOGY_CONFIG_ID, siteConfigID);
+        if (topologyConfigID != persistedTopologyConfigId || ts != persistedSnapStart || ts != persistedSnapTranferDone) {
+            log.warn("The update is not valid, the entry's snapshotTimestamp {} is wrong according to the persistedMetadata {}", ts, record.getPayload());
+            return;
+        }
 
-        appendUpdate(txBuilder, LogReplicationMetadataType.LAST_SNAPSHOT_APPLIED, ts);
-        appendUpdate(txBuilder, LogReplicationMetadataType.LAST_LOG_PROCESSED, ts);
+        LogReplicationMetadataVal metadataVal = LogReplicationMetadataVal.newBuilder(record.getPayload()).
+                setSnapshotAppliedTimestamp(ts).
+                setLastLogEntryProcessedTimestamp(ts).
+                build();
 
-        //may not need
-        appendUpdate(txBuilder, LogReplicationMetadataType.LAST_SNAPSHOT_SEQ_NUM, Address.NON_ADDRESS);
+        try {
+            txBuilder.commit(metadataVal);
+        } catch (TransactionAbortedException e) {
+            log.warn("Transaction aborted while updating the log replication metadata with the new value {}", metadataVal);
+        }
 
-        txBuilder.commit(timestamp);
-
-        log.debug("Commit. Set snapshotStart topologyConfigId " + siteConfigID + " ts " + ts +
-                " persistSiteConfigID " + persistSiteConfigID + " persistSnapStart " + persistSnapStart);
+        return;
     }
 
-    @Override
-    public String toString() {
+    /**
+     * Get the current metadata from corfu store in string format used by logging.
+     * @return
+     */
+    private String getPersistedMetadataStr() {
+        CorfuRecord<LogReplicationMetadataVal, LogReplicationMetadataKey> record = metadataTable.get(currentMetadataKey);
+        if (record == null) {
+            log.warn("No metadata available in the corfu store. The operation could not succeed");
+            return "No LogReplicationMetadata";
+        }
+
+        return getPersistedMetadataStr(record.getPayload());
+    }
+
+
+    /**
+     * Given a metadata, get the metadata in string format used by logging.
+     * @param metadataVal
+     * @return
+     */
+    static public String getPersistedMetadataStr(LogReplicationMetadataVal metadataVal) {
         String s = new String();
-        s.concat(LogReplicationMetadataType.TOPOLOGY_CONFIG_ID.getVal() + " " + getTopologyConfigId() +" ");
-        s.concat(LogReplicationMetadataType.LAST_SNAPSHOT_STARTED.getVal() + " " + getLastSnapStartTimestamp() +" ");
-        s.concat(LogReplicationMetadataType.LAST_SNAPSHOT_TRANSFERRED.getVal() + " " + getLastSnapTransferDoneTimestamp() + " ");
-        s.concat(LogReplicationMetadataType.LAST_SNAPSHOT_APPLIED.getVal() + " " + getLastAppliedBaseSnapshotTimestamp() + " ");
-        s.concat(LogReplicationMetadataType.LAST_SNAPSHOT_SEQ_NUM.getVal() + " " + getLastSnapSeqNum() + " ");
-        s.concat(LogReplicationMetadataType.LAST_LOG_PROCESSED.getVal() + " " + getLastProcessedLogTimestamp() + " ");
+
+        s.concat(LogReplicationMetadataName.TOPOLOGY_CONFIG_ID.getVal() + " " + metadataVal.getTopologyConfigId() + " ");
+        s.concat(LogReplicationMetadataName.LAST_SNAPSHOT_STARTED.getVal() + " " + metadataVal.getSnapshotStartTimestamp() +" ");
+        s.concat(LogReplicationMetadataName.LAST_SNAPSHOT_TRANSFERRED.getVal() + " " + metadataVal.getSnapshotTransferredTimestamp() + " ");
+        s.concat(LogReplicationMetadataName.LAST_SNAPSHOT_APPLIED.getVal() + " " + metadataVal.getSnapshotAppliedTimestamp() + " ");
+        s.concat(LogReplicationMetadataName.LAST_SNAPSHOT_MSG_RECEIVED_SEQ_NUM.getVal() + " " + metadataVal.getSnapshotMessageAppliedSeqNum() + " ");
+        s.concat(LogReplicationMetadataName.LAST_SNAPSHOT_MSG_APPLIED_SEQ_NUM.getVal() + " " + metadataVal.getSnapshotMessageAppliedSeqNum() + " ");
+        s.concat(LogReplicationMetadataName.LAST_LOG_PROCESSED.getVal() + " " + metadataVal.getLastLogEntryProcessedTimestamp() + " ");
 
         return s;
     }
@@ -322,54 +362,21 @@ public class LogReplicationMetadataManager {
         return runtime.getAddressSpaceView().getTrimMark().getSequence();
     }
 
-    /**
-     * Set the snapshot sync start marker, i.e., a unique identification of the current snapshot sync cycle.
-     * Identified by the snapshot sync Id and the min shadow stream update timestamp for this cycle.
-     *
-     * @param currentSnapshotSyncId
-     * @param shadowStreamTs
-     */
-    public void setSnapshotSyncStartMarker(UUID currentSnapshotSyncId, CorfuStoreMetadata.Timestamp shadowStreamTs, TxBuilder txBuilder) {
-
-        long currentSnapshotSyncIdLong = currentSnapshotSyncId.getMostSignificantBits() & Long.MAX_VALUE;
-        long persistedSnapshotId = query(null, LogReplicationMetadataType.CURRENT_SNAPSHOT_CYCLE_ID);
-
-        if (persistedSnapshotId != currentSnapshotSyncIdLong) {
-            // Update if current Snapshot Sync differs from the persisted one, otherwise ignore.
-            // It could have already been updated in the case that leader changed in between a snapshot sync cycle
-            appendUpdate(txBuilder, LogReplicationMetadataType.CURRENT_SNAPSHOT_CYCLE_ID, currentSnapshotSyncIdLong);
-            appendUpdate(txBuilder, LogReplicationMetadataType.CURRENT_CYCLE_MIN_SHADOW_STREAM_TS, shadowStreamTs.getSequence());
-        }
-    }
-
-    /**
-     * Retrieve the snapshot sync start marker
-     **/
-    public long getMinSnapshotSyncShadowStreamTs() {
-        return query(null, LogReplicationMetadataType.CURRENT_CYCLE_MIN_SHADOW_STREAM_TS);
-    }
-
-    /**
-     * Retrieve the current snapshot sync cycle Id
-     */
-    public long getCurrentSnapshotSyncCycleId() {
-        return query(null, LogReplicationMetadataType.CURRENT_SNAPSHOT_CYCLE_ID);
-    }
-
-    public enum LogReplicationMetadataType {
+    public enum LogReplicationMetadataName {
         TOPOLOGY_CONFIG_ID("topologyConfigId"),
         VERSION("version"),
         LAST_SNAPSHOT_STARTED("lastSnapStart"),
         LAST_SNAPSHOT_TRANSFERRED("lastSnapTransferred"),
         LAST_SNAPSHOT_APPLIED("lastSnapApplied"),
-        LAST_SNAPSHOT_SEQ_NUM("lastSnapSeqNum"),
+        LAST_SNAPSHOT_MSG_RECEIVED_SEQ_NUM("lastSnapMsgReceivedSeqNum"),
+        LAST_SNAPSHOT_MSG_APPLIED_SEQ_NUM("lastSnapMsgAppliedSeqNum"),
         CURRENT_SNAPSHOT_CYCLE_ID("currentSnapshotCycleId"),
         CURRENT_CYCLE_MIN_SHADOW_STREAM_TS("minShadowStreamTimestamp"),
         LAST_LOG_PROCESSED("lastLogProcessed");
 
         @Getter
         String val;
-        LogReplicationMetadataType(String newVal) {
+        LogReplicationMetadataName(String newVal) {
             val  = newVal;
         }
     }
