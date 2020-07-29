@@ -14,6 +14,8 @@ import io.netty.handler.codec.LengthFieldPrepender;
 import io.netty.handler.timeout.IdleStateHandler;
 import lombok.AllArgsConstructor;
 import lombok.Data;
+import lombok.NoArgsConstructor;
+import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
 import org.corfudb.common.protocol.CorfuExceptions;
 import org.corfudb.common.protocol.proto.CorfuProtocol.Header;
@@ -41,13 +43,14 @@ import static com.google.common.base.Preconditions.checkArgument;
  */
 
 @Slf4j
+@NoArgsConstructor
 public abstract class ChannelHandler extends ResponseHandler {
 
     //TODO(Maithem): what if the consuming client is using a different protobuf lib version?
 
-    protected final InetSocketAddress remoteAddress;
+    protected InetSocketAddress remoteAddress;
 
-    protected final EventLoopGroup eventLoopGroup;
+    protected EventLoopGroup eventLoopGroup;
 
     private volatile Channel channel;
 
@@ -67,7 +70,8 @@ public abstract class ChannelHandler extends ResponseHandler {
 
     protected final AtomicLong idGenerator = new AtomicLong();
 
-    private final ClientConfig config;
+    @Setter
+    protected ClientConfig config;
 
     final ReentrantReadWriteLock requestLock = new ReentrantReadWriteLock();
 
@@ -99,6 +103,7 @@ public abstract class ChannelHandler extends ResponseHandler {
                     this.channel.closeFuture().addListener(r -> disconnect());
                     state = ChannelHandlerState.CONNECTED;
                     // TODO(Maithem) Complete handshake here
+                    log.info("peer client connected");
                     this.channelCf.complete(this.channel);
                 } else {
                     disconnect();
@@ -174,8 +179,8 @@ public abstract class ChannelHandler extends ResponseHandler {
         return new ChannelInitializer() {
             @Override
             protected void initChannel(@Nonnull Channel ch) throws Exception {
-                ch.pipeline().addLast(new IdleStateHandler(config.getIdleConnectionTimeoutInMs(),
-                        config.getKeepAlivePeriodInMs(), 0));
+                // ch.pipeline().addLast(new IdleStateHandler(config.getIdleConnectionTimeoutInMs(),
+                //        config.getKeepAlivePeriodInMs(), 0));
 
                 ch.pipeline().addLast(new LengthFieldPrepender(4));
                 ch.pipeline().addLast(new LengthFieldBasedFrameDecoder(Integer.MAX_VALUE,
@@ -223,12 +228,14 @@ public abstract class ChannelHandler extends ResponseHandler {
 
     protected <T> CompletableFuture<T> sendRequest(Request request) {
         requestLock.readLock().lock();
+
         try {
             checkArgument(request.hasHeader());
             Header header = request.getHeader();
             CompletableFuture<T> retVal = new CompletableFuture<>();
             pendingRequests.put(header.getRequestId(), retVal);
             ByteBuf outBuf = PooledByteBufAllocator.DEFAULT.buffer();
+            outBuf.writeByte(0x2); // Temporary -- Add Corfu msg marker indicating new message type
             // TODO(Maithem): remove allocation
             outBuf.writeBytes(request.toByteArray());
             // TODO(Maithem): Handle pipeline errors

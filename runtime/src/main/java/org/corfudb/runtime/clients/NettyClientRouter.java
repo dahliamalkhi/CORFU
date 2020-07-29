@@ -222,7 +222,7 @@ public class NettyClientRouter extends SimpleChannelInboundHandler<CorfuMsg>
         b.group(eventLoopGroup);
         b.channel(parameters.getSocketType().getChannelClass());
         parameters.getNettyChannelOptions().forEach(b::option);
-        b.handler(getChannelInitializer());
+        b.handler(getChannelInitializerPeer()); // Temporary
         b.option(ChannelOption.CONNECT_TIMEOUT_MILLIS, (int) timeoutConnect);
 
         // Asynchronously connect, retrying until shut down.
@@ -299,6 +299,34 @@ public class NettyClientRouter extends SimpleChannelInboundHandler<CorfuMsg>
                             new InboundMsgFilterHandler(parameters.getNettyClientInboundMsgFilters());
                     ch.pipeline().addLast(inboundMsgFilterHandler);
                 }
+                ch.pipeline().addLast(NettyClientRouter.this);
+            }
+        };
+    }
+
+    private ChannelInitializer getChannelInitializerPeer() {
+        return new ChannelInitializer() {
+            @Override
+            protected void initChannel(@Nonnull Channel ch) throws Exception {
+                //ch.pipeline().addLast(new IdleStateHandler(parameters.getIdleConnectionTimeout(),
+                //        parameters.getKeepAlivePeriod(), 0));
+
+                ch.pipeline().addLast(new LengthFieldPrepender(4));
+                ch.pipeline().addLast(new LengthFieldBasedFrameDecoder(Integer.MAX_VALUE,
+                        0, 4, 0,
+                        4));
+
+                ch.pipeline().addLast(new NettyCorfuMessageDecoder());
+                ch.pipeline().addLast(new NettyCorfuMessageEncoder());
+                ch.pipeline().addLast(new ClientHandshakeHandler(parameters.getClientId(),
+                        node.getNodeId(), parameters.getHandshakeTimeout()));
+
+                // If parameters include message filters, add corresponding filter handler
+                // if (parameters.getNettyClientInboundMsgFilters() != null) {
+                //    final InboundMsgFilterHandler inboundMsgFilterHandler =
+                //            new InboundMsgFilterHandler(parameters.getNettyClientInboundMsgFilters());
+                //    ch.pipeline().addLast(inboundMsgFilterHandler);
+                // }
                 ch.pipeline().addLast(NettyClientRouter.this);
             }
         };

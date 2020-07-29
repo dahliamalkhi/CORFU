@@ -205,7 +205,7 @@ public class CorfuServerNode implements AutoCloseable {
                     .channel(context.getChannelImplementation().getServerChannelClass());
             bootstrapConfigurer.configure(bootstrap);
 
-            bootstrap.childHandler(getServerChannelInitializer(context, router));
+            bootstrap.childHandler(getServerChannelInitializerPeer(context, router)); // Temporary
             boolean bindToAllInterfaces =
                     Optional.ofNullable(context.getServerConfig(Boolean.class, "--bind-to-all-interfaces"))
                             .orElse(false);
@@ -330,6 +330,33 @@ public class CorfuServerNode implements AutoCloseable {
                         Version.getVersionString() + "("
                                 + GitRepositoryState.getRepositoryState().commitIdAbbrev + ")",
                         context.getServerConfig(String.class, "--HandshakeTimeout")));
+                // Route the message to the server class.
+                ch.pipeline().addLast(router);
+            }
+        };
+    }
+
+    private static ChannelInitializer getServerChannelInitializerPeer(@Nonnull ServerContext context,
+                                                                  @Nonnull NettyServerRouter router) {
+        // Generate the initializer.
+        return new ChannelInitializer() {
+            @Override
+            protected void initChannel(@Nonnull Channel ch) throws Exception {
+                // Add/parse a length field
+                ch.pipeline().addLast(new LengthFieldPrepender(4));
+                ch.pipeline().addLast(new LengthFieldBasedFrameDecoder(Integer
+                        .MAX_VALUE, 0, 4,
+                        0, 4));
+
+                ch.pipeline().addLast((new ServerRequestHandler())); // Handle new message types
+
+                // Transform the framed message into a Corfu message.
+                ch.pipeline().addLast(new NettyCorfuMessageDecoder());
+                ch.pipeline().addLast(new NettyCorfuMessageEncoder());
+                // ch.pipeline().addLast(new ServerHandshakeHandler(context.getNodeId(),
+                //        Version.getVersionString() + "("
+                //                + GitRepositoryState.getRepositoryState().commitIdAbbrev + ")",
+                //        context.getServerConfig(String.class, "--HandshakeTimeout")));
                 // Route the message to the server class.
                 ch.pipeline().addLast(router);
             }

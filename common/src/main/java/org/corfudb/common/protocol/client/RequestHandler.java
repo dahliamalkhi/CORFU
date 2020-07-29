@@ -20,8 +20,17 @@ public abstract class RequestHandler extends ChannelInboundHandlerAdapter {
     @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
         ByteBuf msgBuf = (ByteBuf) msg;
-        ByteBufInputStream msgInputStream = new ByteBufInputStream(msgBuf);
 
+        // Temporary -- Check Corfu msg marker: 0x1 indicates legacy while 0x2 indicates new
+        if(msgBuf.getByte(msgBuf.readerIndex()) == 0x1) {
+            ctx.fireChannelRead(msgBuf); // Forward legacy corfu msg to next handler
+            return;
+        }
+
+        msgBuf.readByte(); // Temporary -- Consume 0x2 marker
+
+        ByteBufInputStream msgInputStream = new ByteBufInputStream(msgBuf);
+        
         try {
             Request request = Request.parseFrom(msgInputStream);
             Header  header = request.getHeader();
@@ -41,6 +50,10 @@ public abstract class RequestHandler extends ChannelInboundHandlerAdapter {
                 case RESTART:
                     checkArgument(request.hasRestartRequest());
                     handleRestart(request, ctx);
+                    break;
+                case RESET:
+                    checkArgument(request.hasResetRequest());
+                    handleReset(request, ctx);
                     break;
                 case AUTHENTICATE:
                     checkArgument(request.hasAuthenticateRequest());
@@ -132,6 +145,7 @@ public abstract class RequestHandler extends ChannelInboundHandlerAdapter {
 
     protected abstract void handlePing(Request request, ChannelHandlerContext ctx);
     protected abstract void handleRestart(Request request, ChannelHandlerContext ctx);
+    protected abstract void handleReset(Request request, ChannelHandlerContext ctx);
     protected abstract void handleAuthenticate(Request request, ChannelHandlerContext ctx);
     protected abstract void handleSeal(Request request, ChannelHandlerContext ctx);
     protected abstract void handleGetLayout(Request request, ChannelHandlerContext ctx);
