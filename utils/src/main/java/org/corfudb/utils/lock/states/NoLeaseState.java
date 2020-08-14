@@ -2,6 +2,7 @@ package org.corfudb.utils.lock.states;
 
 import lombok.extern.slf4j.Slf4j;
 import org.corfudb.utils.lock.Lock;
+import org.corfudb.utils.lock.persistence.LockStoreException;
 
 import java.util.Optional;
 
@@ -39,6 +40,16 @@ public class NoLeaseState extends LockState {
             case LEASE_RENEWED: {
                 // can happen only if this event arrived late. Lease had already expired.
                 log.warn("Lock: {} renewed event arrived late!", lock.getLockId());
+                return Optional.empty();
+            }
+            case FORCE_LEASE_ACQUIRED: {
+                try {
+                    forceAcquire();
+                    return Optional.of(lock.getStates().get(LockStateType.HAS_LEASE));
+                }
+                catch (Exception e) {
+                    log.error("Lock: {} could not acquire lease", lock.getLockId(), e);
+                }
                 return Optional.empty();
             }
             case LEASE_REVOKED: {
@@ -91,8 +102,12 @@ public class NoLeaseState extends LockState {
                 lock.input(LockEvent.LEASE_ACQUIRED);
             }
         } catch (Exception e) {
-            log.error("Lock: {} could not acquire lease {}", lock.getLockId(), e);
+            log.error("Lock: {} could not acquire lease", lock.getLockId(), e);
         }
+    }
+
+    private void forceAcquire() throws LockStoreException {
+        lockStore.forceAcquire(lock.getLockId());
     }
 
 }

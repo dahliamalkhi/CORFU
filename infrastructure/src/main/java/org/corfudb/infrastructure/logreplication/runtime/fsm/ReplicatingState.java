@@ -45,12 +45,19 @@ public class ReplicatingState implements LogReplicationRuntimeState {
                     fsm.resetRemoteLeaderEndpoint();
                     // If remaining connections verify leadership on connected endpoints, otherwise, return to init
                     // state, until a connection is available.
-                    return fsm.getConnectedEndpoints().size() == 0 ? fsm.getStates().get(LogReplicationRuntimeStateType.WAITING_FOR_CONNECTIVITY) :
+                    return fsm.getConnectedEndpoints().isEmpty() ? fsm.getStates().get(LogReplicationRuntimeStateType.WAITING_FOR_CONNECTIVITY) :
                             fsm.getStates().get(LogReplicationRuntimeStateType.VERIFYING_REMOTE_LEADER);
                 }
 
                 log.debug("Connection lost to non-leader node {}", endpointDown);
                 // If a non-leader node loses connectivity, reconnect async and continue.
+                return null;
+            case REMOTE_LEADER_LOSS:
+                if (fsm.getRemoteLeader().isPresent() && fsm.getRemoteLeader().get().equals(event.getEndpoint())) {
+                    fsm.resetRemoteLeaderEndpoint();
+                    return fsm.getConnectedEndpoints().isEmpty() ? fsm.getStates().get(LogReplicationRuntimeStateType.WAITING_FOR_CONNECTIVITY) :
+                            fsm.getStates().get(LogReplicationRuntimeStateType.VERIFYING_REMOTE_LEADER);
+                }
                 return null;
             case ON_CONNECTION_UP:
                 // Some node got connected, update connected endpoints

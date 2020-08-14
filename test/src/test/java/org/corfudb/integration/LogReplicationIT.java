@@ -8,14 +8,7 @@ import static org.corfudb.integration.ReplicationReaderWriterIT.ckStreamsAndTrim
 
 import com.google.common.reflect.TypeToken;
 import java.io.IOException;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Observable;
-import java.util.Observer;
-import java.util.Set;
-import java.util.UUID;
+import java.util.*;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.Semaphore;
@@ -1220,7 +1213,7 @@ public class LogReplicationIT extends AbstractIT implements Observer {
         LogReplicationSourceManager logReplicationSourceManager = new LogReplicationSourceManager(
                 LogReplicationRuntimeParameters.builder()
                         .remoteClusterDescriptor(new ClusterDescriptor(REMOTE_CLUSTER_ID,
-                                LogReplicationClusterInfo.ClusterRole.ACTIVE, CORFU_PORT))
+                                LogReplicationClusterInfo.ClusterRole.ACTIVE, CORFU_PORT, new ArrayList<>()))
                                 .replicationConfig(config).localCorfuEndpoint(SOURCE_ENDPOINT).build(),
                 logReplicationMetadataManager,
                 sourceDataSender);
