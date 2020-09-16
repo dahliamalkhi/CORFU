@@ -31,6 +31,7 @@ import org.slf4j.LoggerFactory;
 
 import java.lang.reflect.InvocationTargetException;
 import java.time.Duration;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
@@ -95,6 +96,9 @@ public class CorfuCompileProxy<T extends ICorfuSMR<T>> implements ICorfuSMRProxy
     @Getter
     ISerializer serializer;
 
+    @Getter
+    Set<UUID> streamTags;
+
     /**
      * The arguments this proxy was created with.
      */
@@ -124,17 +128,20 @@ public class CorfuCompileProxy<T extends ICorfuSMR<T>> implements ICorfuSMRProxy
      * @param type                Type of underlying object to instantiate a new instance.
      * @param args                Arguments to create this proxy.
      * @param serializer          Serializer used by the SMR entries to serialize the arguments.
+     * @param streamTags          Tags applied to the stream
+     * @param wrapperObject       The wrapped object
      */
     @Deprecated // TODO: Add replacement method that conforms to style
     @SuppressWarnings("checkstyle:abbreviation") // Due to deprecation
     public CorfuCompileProxy(CorfuRuntime rt, UUID streamID, Class<T> type, Object[] args,
-                             ISerializer serializer, ICorfuSMR<T> wrapperObject
-    ) {
+                             ISerializer serializer, Set<UUID> streamTags,
+                             ICorfuSMR<T> wrapperObject) {
         this.rt = rt;
         this.streamID = streamID;
         this.type = type;
         this.args = args;
         this.serializer = serializer;
+        this.streamTags = streamTags;
 
         // Since the VLO is thread safe we don't need to use a thread safe stream implementation
         // because the VLO will control access to the stream
