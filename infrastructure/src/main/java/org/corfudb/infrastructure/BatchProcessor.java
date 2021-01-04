@@ -51,6 +51,7 @@ public class BatchProcessor implements AutoCloseable {
     private ExecutorService processorService = Executors
             .newSingleThreadExecutor(new ThreadFactoryBuilder()
                     .setDaemon(false)
+                    .setPriority(Thread.MAX_PRIORITY)
                     .setNameFormat("LogUnit-BatchProcessor-%d")
                     .build());
     private final Optional<Timer> writeRecordTimer;
