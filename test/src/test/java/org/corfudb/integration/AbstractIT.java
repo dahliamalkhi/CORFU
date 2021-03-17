@@ -26,8 +26,6 @@ import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Properties;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
@@ -56,8 +54,8 @@ public class AbstractIT extends AbstractCorfuTest {
     private static final String KILL_COMMAND = "pkill -9 -P ";
     private static final String FORCE_KILL_ALL_CORFU_COMMAND = "jps | grep -e CorfuServer -e CorfuInterClusterReplicationServer|awk '{print $1}'| xargs kill -9";
 
-    private static final int SHUTDOWN_RETRIES = 10;
-    private static final long SHUTDOWN_RETRY_WAIT = 500;
+    private static final int SHUTDOWN_RETRIES = 20;
+    private static final long SHUTDOWN_RETRY_WAIT = 1000;
 
     // Config the msg size for log replication data
     // sent from active cluster to the standby cluster.
@@ -136,17 +134,10 @@ public class AbstractIT extends AbstractCorfuTest {
     public static boolean shutdownCorfuServer(Process corfuServerProcess) throws IOException, InterruptedException {
         int retries = SHUTDOWN_RETRIES;
         while (true) {
-            long parentPid = getPid(corfuServerProcess);
-            // Get Children PIDs
-            List<Long> pidList = getChildPIDs(parentPid);
-            pidList.add(parentPid);
-
             ProcessBuilder builder = new ProcessBuilder();
-            for (Long pid : pidList) {
-                builder.command("sh", "-c", KILL_COMMAND + pid.longValue());
-                Process p = builder.start();
-                p.waitFor();
-            }
+            builder.command("sh", "-c", KILL_COMMAND + getPid(corfuServerProcess));
+            Process p = builder.start();
+            p.waitFor();
 
             if (retries == 0) {
                 return false;
@@ -219,49 +210,6 @@ public class AbstractIT extends AbstractCorfuTest {
             TimeUnit.MILLISECONDS.sleep(PARAMETERS.TIMEOUT_VERY_SHORT.toMillis());
         }
     }
-
-    /**
-     * Get list of children (descendant) process identifiers (recursive)
-     *
-     * @param pid parent process identifier
-     * @return list of children process identifiers
-     *
-     * @throws IOException
-     */
-    private static List<Long> getChildPIDs (long pid) {
-        List<Long> childPIDs = new ArrayList<>();
-        try {
-            // Get child pid(s)
-            ProcessBuilder builder = new ProcessBuilder();
-            builder.command("sh", "-c", "pgrep -P " + pid);
-            Process p = builder.start();
-            p.waitFor();
-
-            // Read output
-            BufferedReader br = new BufferedReader(new InputStreamReader(p.getInputStream()));
-            String line = null;
-            String previous = null;
-            while ((line = br.readLine()) != null) {
-                if (!line.equals(previous)) {
-                    previous = line;
-                    long childPID = Long.parseLong(line);
-                    childPIDs.add(childPID);
-                }
-            }
-
-            // Recursive lookup of children pids
-            for (Long childPID : childPIDs) {
-                List<Long> pidRecursive = getChildPIDs(childPID.longValue());
-                childPIDs.addAll(pidRecursive);
-            }
-
-        } catch (IOException e) {
-            throw e;
-        } finally {
-            return childPIDs;
-        }
-    }
-
 
     public static long getPid(Process p) {
         long pid = -1;
