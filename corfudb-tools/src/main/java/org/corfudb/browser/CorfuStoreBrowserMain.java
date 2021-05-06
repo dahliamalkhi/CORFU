@@ -18,16 +18,17 @@ import org.docopt.Docopt;
 @Slf4j
 public class CorfuStoreBrowserMain {
     private enum OperationType {
-        listTables,
-        loadTable,
-        infoTable,
-        showTable,
-        listenOnTable,
+        deleteRecord,
         dropTable,
+        infoTable,
         listTags,
+        listTables,
         listTablesForTag,
         listTagsForTable,
-        listTagsMap
+        listTagsMap,
+        listenOnTable,
+        loadTable,
+        showTable
     }
 
     private static final String USAGE = "Usage: corfu-browser --host=<host> " +
@@ -36,6 +37,7 @@ public class CorfuStoreBrowserMain {
         "[--keystore=<keystore_file>] [--ks_password=<keystore_password>] " +
         "[--truststore=<truststore_file>] [--truststore_password=<truststore_password>] " +
         "[--diskPath=<pathToTempDirForLargeTables>] "+
+        "[--deleteRecord=<deleteRecord>] "+
         "[--numItems=<numItems>] "+
         "[--batchSize=<itemsPerTransaction>] "+
         "[--itemSize=<sizeOfEachRecordValue>] "+
@@ -52,6 +54,7 @@ public class CorfuStoreBrowserMain {
         + "--truststore=<truststore_file> TrustStore File\n"
         + "--truststore_password=<truststore_password> Truststore Password\n"
         + "--diskPath=<pathToTempDirForLargeTables> Path to Temp Dir\n"
+        + "--deleteRecord=<deleteRecord> The key of the record to be deleted in JSON\n"
         + "--numItems=<numItems> Total Number of items for loadTable\n"
         + "--batchSize=<batchSize> Number of records per transaction for loadTable\n"
         + "--itemSize=<itemSize> Size of each item's payload for loadTable\n"
@@ -112,6 +115,9 @@ public class CorfuStoreBrowserMain {
             String tableName = Optional.ofNullable(opts.get("--tablename"))
                     .map(Object::toString)
                     .orElse(null);
+            String deleteRecordKey = Optional.ofNullable(opts.get("--deleteRecord"))
+                    .map(Object::toString)
+                    .orElse(null);
             switch (Enum.valueOf(OperationType.class, operation)) {
                 case listTables:
                     browser.listTables(namespace);
@@ -121,6 +127,9 @@ public class CorfuStoreBrowserMain {
                     break;
                 case dropTable:
                     browser.dropTable(namespace, tableName);
+                    break;
+                case deleteRecord:
+                    browser.deleteRecord(namespace, tableName, deleteRecordKey);
                     break;
                 case showTable:
                     browser.printTable(namespace, tableName);
