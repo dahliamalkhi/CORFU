@@ -43,7 +43,6 @@ public class Streams implements DataSet<StreamId> {
 
     @EqualsAndHashCode
     @AllArgsConstructor
-    @ToString(doNotUseGetters = true)
     public static final class StreamId {
         private final int streamId;
 
@@ -53,6 +52,11 @@ public class Streams implements DataSet<StreamId> {
 
         public UUID getStreamId() {
             return CorfuRuntime.getStreamID(getTableName());
+        }
+
+        @Override
+        public String toString() {
+            return String.valueOf(streamId);
         }
     }
 }

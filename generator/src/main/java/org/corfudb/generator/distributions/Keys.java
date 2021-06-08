@@ -49,12 +49,16 @@ public class Keys implements DataSet<Keys.KeyId> {
 
     @EqualsAndHashCode
     @AllArgsConstructor
-    @ToString
     public static class KeyId {
         private final int key;
 
         public String getKey() {
             return String.valueOf(key);
+        }
+
+        @Override
+        public String toString() {
+            return getKey();
         }
     }
 
@@ -70,7 +74,6 @@ public class Keys implements DataSet<Keys.KeyId> {
 
     @AllArgsConstructor(access = AccessLevel.PRIVATE)
     @EqualsAndHashCode
-    @ToString
     public static class Version implements Comparable<Version> {
         private static final ConcurrentMap<Long, Version> REGISTRY = new ConcurrentHashMap<>();
         private static final Function<Long, Version> FACTORY = Version::new;
@@ -89,6 +92,11 @@ public class Keys implements DataSet<Keys.KeyId> {
         @Override
         public int compareTo(Version other) {
             return Long.compare(ver, other.ver);
+        }
+
+        @Override
+        public String toString() {
+            return String.valueOf(ver);
         }
     }
 }

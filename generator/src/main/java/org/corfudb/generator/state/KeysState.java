@@ -54,9 +54,9 @@ public class KeysState {
 
     @ToString
     public static class VersionedKey {
-        private final SortedMap<Keys.Version, KeyEntry> history = new TreeMap<>();
+        private final SortedMap<Version, KeyEntry> history = new TreeMap<>();
 
-        public KeyEntry get(Keys.Version version){
+        public KeyEntry get(Version version){
             return history.get(version);
         }
 
