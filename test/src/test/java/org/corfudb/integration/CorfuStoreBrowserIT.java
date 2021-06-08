@@ -225,6 +225,11 @@ public class CorfuStoreBrowserIT extends AbstractIT {
         assertThat(tags.size()).isEqualTo(expectedTableNameToTags.get(tableName).size());
         assertThat(tags).containsExactly(expectedTableNameToTags.get(tableName).toArray(new String[0]));
 
+        final int totalExpectedStreams = 30;
+        // (5) List All known streams and their UUIDs
+        Set<String> allStreams = browser.listAllCorfuStreams();
+        assertThat(allStreams.size()).isEqualTo(totalExpectedStreams);
+
         runtime.shutdown();
         Serializers.clearCustomSerializers();
 

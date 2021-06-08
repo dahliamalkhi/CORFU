@@ -283,9 +283,13 @@ public class LogUnitServer extends AbstractServer {
     @RequestHandler(type = PayloadCase.WRITE_LOG_REQUEST)
     private void handleWrite(RequestMsg req, ChannelHandlerContext ctx, IServerRouter router) {
         LogData logData = getLogData(req.getPayload().getWriteLogRequest().getLogData());
-
         log.debug("handleWrite: type: {}, address: {}, streams: {}",
-                logData.getType(), logData.getToken(), logData.getBackpointerMap());
+                logData.getType(), logData.getToken(),
+                logData.getBackpointerMap().entrySet().stream().collect(Collectors.toMap(k ->
+                                serverContext.getStreamNames().getOrDefault(k, k.toString()),
+                        Map.Entry::getValue) // Re-map to stream name -> long from UUID -> long
+                )
+        );
 
         // Its not clear that making all holes high priority is the right thing to do, but since
         // some reads will block until a hole is filled this is required (i.e. bypass quota checks)

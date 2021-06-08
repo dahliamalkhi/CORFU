@@ -27,7 +27,8 @@ public class CorfuStoreBrowserMain {
         listTags,
         listTablesForTag,
         listTagsForTable,
-        listTagsMap
+        listTagsMap,
+        listAllCorfuStreams
     }
 
     private static final String USAGE = "Usage: corfu-browser --host=<host> " +
@@ -43,7 +44,7 @@ public class CorfuStoreBrowserMain {
         + "Options:\n"
         + "--host=<host>   Hostname\n"
         + "--port=<port>   Port\n"
-        + "--operation=<listTables|infoTable|showTable|dropTable|loadTable|listenOnTable|listTags|listTagsMap|listTablesForTag|listTagsForTable> Operation\n"
+        + "--operation=<listTables|infoTable|showTable|dropTable|loadTable|listenOnTable|listTags|listTagsMap|listTablesForTag|listTagsForTable|listAllCorfuStreams> Operation\n"
         + "--namespace=<namespace>   Namespace\n"
         + "--tablename=<tablename>   Table Name\n"
         + "--tag=<tag>  Stream tag of interest\n"
@@ -164,6 +165,9 @@ public class CorfuStoreBrowserMain {
                     break;
                 case listTagsMap:
                     browser.listTagToTableMap();
+                    break;
+                case listAllCorfuStreams:
+                    browser.listAllCorfuStreams();
                     break;
                 default:
                     break;
