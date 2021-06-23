@@ -20,6 +20,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
 
+import com.google.protobuf.DynamicMessage;
 import com.google.protobuf.InvalidProtocolBufferException;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
@@ -233,6 +234,51 @@ public class CorfuStoreBrowser {
                 tablename, namespace, streamUUID.toString(), tableSize);
         table.clear();
         log.info("Table cleared successfully");
+        log.info("\n======================\n");
+        return tableSize;
+    }
+
+    /**
+     * Delete a specific record in a table using the JSON output from printTable
+     * @param namespace - the namespace where the table belongs
+     * @param tablename - table name without the namespace
+     * @param deleteRecordKey - the JSON key of the record to be deleted
+     * @return - number of entries in the table after deleting the record
+     */
+    public int deleteRecord(String namespace, String tablename, String deleteRecordKey) {
+        verifyNamespaceAndTablename(namespace, tablename);
+        log.info("\n======================\n");
+        String fullName = TableRegistry.getFullyQualifiedTableName(namespace, tablename);
+        UUID streamUUID = UUID.nameUUIDFromBytes(fullName.getBytes());
+        CorfuTable<CorfuDynamicKey, CorfuDynamicRecord> table = getTable(namespace, tablename);
+
+        TableName tableNameProto = TableName.newBuilder().setNamespace(namespace).setTableName(tablename).build();
+        final CorfuStoreMetadata.TableDescriptors tableDescriptor = runtime.getTableRegistry().getTableDescriptor(tableNameProto);
+        if (tableDescriptor == null) {
+            return 0;
+        }
+        final DynamicMessage.Builder builder = DynamicMessage.newBuilder(tableDescriptor);
+        try {
+            JsonFormat.parser().merge(deleteRecordKey, builder);
+        } catch (InvalidProtocolBufferException e) {
+            log.warn("Unable to parse key {}", deleteRecordKey);
+            return 0;
+        }
+        DynamicMessage keyMessage = builder.build();
+
+        int tableSize = table.size();
+        // TODO: Is there a way to construct the typeUrl without iterating over all the keys?
+        for (CorfuDynamicKey key : table.keySet()) {
+            if (key.getKey().equals(keyMessage)) {
+                log.info("Deleting record in Table {} in namespace {} with ID {} with {} entries",
+                        tablename, namespace, streamUUID.toString(), tableSize);
+                table.delete(key);
+                log.info("\n======================\n");
+                return tableSize - 1;
+            }
+        }
+        log.info("Record NOT Found: {} in Table {} in namespace {} with ID {} with {} entries",
+                deleteRecordKey, tablename, namespace, streamUUID.toString(), tableSize);
         log.info("\n======================\n");
         return tableSize;
     }
@@ -472,6 +518,11 @@ public class CorfuStoreBrowser {
         return streamTagToTableNames.get(streamTag);
     }
 
+    /**
+     *
+     * @return map where key is stream tag and value is the list of tables having that
+     * defined in their protobufs
+     */
     private Map<String, List<TableName>> getTagToTableNamesMap() {
         Map<String, List<TableName>> streamTagToTableNames = new HashMap<>();
         runtime.getTableRegistry().getRegistryTable().forEach((tableName, schema) ->

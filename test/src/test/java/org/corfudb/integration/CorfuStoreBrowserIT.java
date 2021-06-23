@@ -13,7 +13,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import com.google.protobuf.util.JsonFormat;
 import org.corfudb.runtime.CorfuStoreMetadata;
+import org.corfudb.runtime.collections.CorfuDynamicKey;
 import org.corfudb.runtime.collections.Table;
 import org.corfudb.runtime.view.TableRegistry;
 import org.corfudb.util.serializer.Serializers;
@@ -141,6 +143,82 @@ public class CorfuStoreBrowserIT extends AbstractIT {
         Assert.assertEquals(browser.dropTable(namespace, tableName), 1);
         // Invoke tableInfo and verify size
         Assert.assertEquals(browser.printTableInfo(namespace, tableName), 0);
+        // TODO: Remove this once serializers move into the runtime
+        Serializers.clearCustomSerializers();
+    }
+
+    /**
+     * Delete a record: Create a table and add data to it.  Verify that the browser tool is able
+     * to read its contents accurately, then delete a record.
+     * @throws IOException
+     * @throws NoSuchMethodException
+     * @throws IllegalAccessException
+     * @throws InvocationTargetException
+     */
+    @Test
+    public void browserDeleteRecordTest() throws
+            IOException,
+            NoSuchMethodException,
+            IllegalAccessException,
+            InvocationTargetException {
+        final String namespace = "namespace";
+        final String tableName = "table";
+        Process corfuServer = runSinglePersistentServer(corfuSingleNodeHost,
+                corfuStringNodePort);
+
+        // Start a Corfu runtime
+        runtime = createRuntime(singleNodeEndpoint);
+
+        CorfuStore store = new CorfuStore(runtime);
+
+        final Table<SampleSchema.Uuid, SampleSchema.Uuid, SampleSchema.Uuid> table1 = store.openTable(
+                namespace,
+                tableName,
+                SampleSchema.Uuid.class,
+                SampleSchema.Uuid.class,
+                SampleSchema.Uuid.class,
+                TableOptions.builder().build());
+
+        final long keyUuid = 1L;
+        final long valueUuid = 3L;
+        final long metadataUuid = 5L;
+
+        SampleSchema.Uuid uuidKey = SampleSchema.Uuid.newBuilder()
+                .setMsb(keyUuid)
+                .setLsb(keyUuid)
+                .build();
+        SampleSchema.Uuid uuidVal = SampleSchema.Uuid.newBuilder()
+                .setMsb(valueUuid)
+                .setLsb(valueUuid)
+                .build();
+        SampleSchema.Uuid metadata = SampleSchema.Uuid.newBuilder()
+                .setMsb(metadataUuid)
+                .setLsb(metadataUuid)
+                .build();
+        TxnContext tx = store.txn(namespace);
+        tx.putRecord(table1, uuidKey, uuidVal, metadata);
+        tx.commit();
+        runtime.shutdown();
+
+        runtime = createRuntime(singleNodeEndpoint);
+        CorfuStoreBrowser browser = new CorfuStoreBrowser(runtime);
+        // Invoke listTables and verify table count
+        Assert.assertEquals(browser.listTables(namespace), 1);
+
+        // Invoke the browser and go through each item
+        CorfuTable table = browser.getTable(namespace, tableName);
+        String keyJson = null;
+        for (Object obj : table.keySet()) {
+            CorfuDynamicKey key = (CorfuDynamicKey) obj;
+            keyJson = JsonFormat.printer().print(key.getKey());
+            if (keyJson != null) {
+                break;
+            }
+        }
+
+        // Now delete the record to test that it works.
+        Assert.assertEquals(browser.deleteRecord(namespace, tableName, keyJson), 0);
+
         // TODO: Remove this once serializers move into the runtime
         Serializers.clearCustomSerializers();
     }

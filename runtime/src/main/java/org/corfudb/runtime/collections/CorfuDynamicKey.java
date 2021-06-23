@@ -23,6 +23,7 @@ public class CorfuDynamicKey {
     /**
      * Payload of the key stored in the CorfuTable.
      */
+    @Getter
     private final CorfuDynamicMessage key;
 
     public CorfuDynamicKey(String keyTypeUrl,
