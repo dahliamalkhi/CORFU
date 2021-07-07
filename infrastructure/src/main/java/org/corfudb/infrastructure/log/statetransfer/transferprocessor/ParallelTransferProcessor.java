@@ -28,6 +28,10 @@ import static org.corfudb.infrastructure.log.statetransfer.transferprocessor.Tra
 @Slf4j
 public class ParallelTransferProcessor {
     /**
+     * Default number of in-flight requests per node.
+     */
+    private static final int DEFAULT_NUM_INFLIGHT_REQUESTS = 5;
+    /**
      * A state transfer batch processor that performs the batch transfer.
      */
     private final StateTransferBatchProcessor stateTransferBatchProcessor;
@@ -35,11 +39,19 @@ public class ParallelTransferProcessor {
     /**
      * A number of in-flight requests per one node.
      */
-    private static final int NUM_REQUESTS_PER_NODE = 5;
+    private final int numberOfConcurrentRequests;
 
     public ParallelTransferProcessor(StateTransferBatchProcessor stateTransferBatchProcessor) {
         this.stateTransferBatchProcessor = stateTransferBatchProcessor;
+        this.numberOfConcurrentRequests = DEFAULT_NUM_INFLIGHT_REQUESTS;
     }
+
+    public ParallelTransferProcessor(StateTransferBatchProcessor stateTransferBatchProcessor,
+                                     int numRequests) {
+        this.stateTransferBatchProcessor = stateTransferBatchProcessor;
+        this.numberOfConcurrentRequests = numRequests;
+    }
+
 
     private CompletableFuture<Void> handleNonTransferException(CompletableFuture<Void> futures,
                                                                Throwable ex) {
@@ -103,8 +115,8 @@ public class ParallelTransferProcessor {
             allFutures = handleNonTransferException(allFutures,
                     new IllegalArgumentException("Number of nodes should be > 0"));
         } else {
-            // The number of available permits is NUM_REQUESTS_PER_NODE * parFactor.
-            Semaphore semaphore = new Semaphore(parFactor * NUM_REQUESTS_PER_NODE, true);
+            // The number of available permits is batchesPerNode * parFactor.
+            Semaphore semaphore = new Semaphore(parFactor * numberOfConcurrentRequests, true);
             while (iterator.hasNext() && !allFutures.isCompletedExceptionally()) {
                 try {
                     TransferBatchRequest request = iterator.next();
