@@ -4,11 +4,11 @@ import lombok.extern.slf4j.Slf4j;
 import org.corfudb.runtime.CorfuRuntime;
 
 import javax.annotation.Nonnull;
+import java.util.concurrent.TimeUnit;
 
 /**
- *
  * A workflow action. All workflow actions must extend this class.
- *
+ * <p>
  * Created by Maithem on 10/25/17.
  */
 
@@ -17,8 +17,11 @@ public abstract class Action {
 
     ActionStatus status = ActionStatus.CREATED;
 
+    private final long retryInterval = 300L;
+
     /**
      * Returns the name of this action.
+     *
      * @return Name of action
      */
     @Nonnull
@@ -26,6 +29,7 @@ public abstract class Action {
 
     /**
      * The implementation of the action
+     *
      * @param runtime A runtime that the action will use to execute
      * @throws Exception
      */
@@ -35,7 +39,7 @@ public abstract class Action {
      * Execute the action.
      */
     @Nonnull
-    public void execute(@Nonnull CorfuRuntime runtime, int numRetry) {
+    public void execute(@Nonnull CorfuRuntime runtime, int numRetry) throws InterruptedException {
         for (int x = 0; x < numRetry; x++) {
             try {
                 changeStatus(ActionStatus.STARTED);
@@ -47,12 +51,14 @@ public abstract class Action {
                         getName(), x, e);
                 changeStatus(ActionStatus.ERROR);
                 runtime.invalidateLayout();
+                TimeUnit.MILLISECONDS.sleep(retryInterval);
             }
         }
     }
 
     /**
      * Get the status of this action.
+     *
      * @return ActionStatus
      */
     public ActionStatus getStatus() {
@@ -61,6 +67,7 @@ public abstract class Action {
 
     /**
      * Changes the status of this action
+     *
      * @param newStatus the new status
      */
     void changeStatus(ActionStatus newStatus) {
