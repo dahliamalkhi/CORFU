@@ -11,6 +11,7 @@ import lombok.experimental.Accessors;
 import lombok.extern.slf4j.Slf4j;
 import org.corfudb.comm.ChannelImplementation;
 import org.corfudb.common.compression.Codec;
+import org.corfudb.common.metrics.micrometer.MeterRegistryProvider;
 import org.corfudb.common.metrics.micrometer.MeterRegistryProvider.MeterRegistryInitializer;
 import org.corfudb.common.metrics.micrometer.MicroMeterUtils;
 import org.corfudb.runtime.clients.BaseClient;
@@ -886,7 +887,7 @@ public class CorfuRuntime {
         if (parameters.metricsEnabled) {
             Logger logger = LoggerFactory.getLogger("org.corfudb.client.metricsdata");
             if (logger.isDebugEnabled()) {
-                MeterRegistryInitializer.init(logger,
+                MeterRegistryInitializer.initLoggingRegistry(logger,
                         Duration.ofMinutes(1),
                         parameters.clientId.toString());
             } else {
@@ -965,6 +966,7 @@ public class CorfuRuntime {
         if (parameters.shutdownNettyEventLoop) {
             nettyEventLoop.shutdownGracefully();
         }
+        MeterRegistryProvider.close();
     }
 
     /**
