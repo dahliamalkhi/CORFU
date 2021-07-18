@@ -199,11 +199,8 @@ jobs:
         run: |
           echo yay
           pwd
-          ls -la
-          ls -la ${{ env.GITHUB_WORKSPACE }}
-          ls -la ${{ env.GITHUB_WORKSPACE }}/corfudb-cloud/
-          ls -la ${{ env.GITHUB_WORKSPACE }}/corfudb-cloud/tests/build
-          ls -la ${{ env.GITHUB_WORKSPACE }}/corfudb-cloud/tests/build/corfu-longevity-app/
+          ls -la build
+          ls -la build/corfu-longevity-app/
 
       - name: archive longevity logs
         working-directory: ${{ env.GITHUB_WORKSPACE }}/corfudb-cloud/tests/
