@@ -190,10 +190,10 @@ jobs:
 
       - name: Run injection framework with universe framework
         working-directory: ./tests
-        run: ./gradlew clean test correctnessLogDistribution -Dtags=longevity-docker
+        run: ./gradlew clean test -Dtags=longevity-docker
 
       - name: archive longevity logs
-        working-directory: ./tests
+        working-directory: ${{ env.GITHUB_WORKSPACE }}/corfudb-cloud/tests/
         run: ./gradlew correctnessLogDistribution
 
       - name: upload longevity logs artifacts
@@ -201,6 +201,7 @@ jobs:
         with:
           name: injection-framework-logs
           retention-days: 3
+          #/home/runner/work/CorfuDB/corfudb-cloud...
           path: ${{ env.GITHUB_WORKSPACE }}/corfudb-cloud/tests/build/corfu-longevity-app/correctness.log.zip
 
       - name: Run injection framework verification
