@@ -199,8 +199,12 @@ jobs:
         run: |
           echo yay
           pwd
+          echo builddir
           ls -la build
+          echolongevitydir
           ls -la build/corfu-longevity-app/
+          echo full path
+          ls -la /home/runner/work/CorfuDB/corfudb-cloud
 
       - name: archive longevity logs
         working-directory: ${{ env.GITHUB_WORKSPACE }}/corfudb-cloud/tests/
