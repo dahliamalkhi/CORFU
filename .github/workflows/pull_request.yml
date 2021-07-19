@@ -201,7 +201,7 @@ jobs:
           pwd
           echo builddir
           ls -la build
-          echolongevitydir
+          echo longevitydir
           ls -la build/corfu-longevity-app/
           echo full path
           ls -la /home/runner/work/CorfuDB/corfudb-cloud
